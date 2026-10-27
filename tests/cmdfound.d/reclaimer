@@ -1,0 +1,36 @@
+#!/bin/sh
+#a channel whose tool keeps a store only the tool may delete from. It says
+#reclaims=yes, so after a purge takes its placements away it is asked to give
+#back what they held; its reclaim leaves a mark in CMDFOUND_HOME and says it
+#freed a megabyte, or what FAKE_RECLAIMER_FREED says. Asked what a placement
+#takes, it says "count it", or the bytes FAKE_RECLAIMER_SIZE says, or that it
+#cannot be asked when that is "down". FAKE_RECLAIMER_LOG, when set, is where it
+#writes down each size and reclaim it was asked, with what it was handed and
+#whether CMDFOUND_HOME was still there. It only answers "reclaimme"
+
+_program() {
+    mkdir -p "${CMDFOUND_HOME}/tmp" 2>/dev/null
+    printf "%s\n" '#!/bin/sh' 'printf "%s\n" "reclaimme ran"' > "${CMDFOUND_HOME}/tmp/reclaimme"
+    printf "%s\n" "${CMDFOUND_HOME}/tmp/reclaimme"
+}
+
+case "${1}" in
+    meta)    printf "%s\n" "kind=artifact" "confines=no" "describes=self" "reclaims=yes" ;;
+    probe)   [ X"${2}" = X"reclaimme" ] || exit 1
+             printf "%s\n" "version=1.0" "bytes=30" "badge=none" ;;
+    locate)  [ X"${2}" = X"reclaimme" ] || exit 1
+             printf "url=%s\n" "$(_program)"
+             printf "%s\n" "format=raw" "bin=reclaimme" ;;
+    size)    [ -z "${FAKE_RECLAIMER_LOG}" ] || \
+                 printf "%s\n" "size ${2} ${3} path=${PATH%%:*}" >> "${FAKE_RECLAIMER_LOG}"
+             case "${FAKE_RECLAIMER_SIZE}" in
+                 '')   exit 1 ;;
+                 down) printf "%s\n" "unreachable=the fake store is down"; exit 2 ;;
+                 *)    printf "%s\n" "bytes=${FAKE_RECLAIMER_SIZE}" ;;
+             esac ;;
+    reclaim) [ -z "${FAKE_RECLAIMER_LOG}" ] || \
+                 printf "%s\n" "reclaim ${CMDFOUND_RECLAIM-unset} path=${PATH%%:*} $([ -d "${CMDFOUND_HOME}/channels" ] && printf here || printf gone)" >> "${FAKE_RECLAIMER_LOG}"
+             printf "%s\n" "reclaimed" >> "${CMDFOUND_HOME}/reclaimed"
+             printf "%s\n" "freed=${FAKE_RECLAIMER_FREED:-1048576}" ;;
+    *) exit 1 ;;
+esac

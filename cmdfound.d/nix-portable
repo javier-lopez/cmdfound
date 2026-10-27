@@ -1,0 +1,586 @@
+#!/bin/sh
+#description: cmdfound channel - nixpkgs, installed by nix through nix-portable, without root
+#usage: nix-portable meta | nix-portable index [bytes] | nix-portable reclaim
+#       nix-portable search WORDS... | nix-portable size nixpkgs.ATTR VER
+#       nix-portable probe NAME|nixpkgs.ATTR [VER]
+#       nix-portable locate NAME|nixpkgs.ATTR VER [PROGRAM]
+#       nix-portable obtain NAME|nixpkgs.ATTR VER [PROGRAM]
+#covers: mise - 120 commands not in nixpkgs (2026-09)
+
+CHANNEL="${CMDFOUND_NIX_PORTABLE_CHANNEL:-https://channels.nixos.org/nixos-unstable}"
+#CMDFOUND_CHANNEL_FILE and not $0: the resolver sources this, and $0 is its own
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+#all the channel has is under it, so one rm -rf removes the channel whole
+CH="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+INDEX="${CH}/index/programs.tsv"
+RELEASE="${CH}/index/release"
+NP="${CH}/.nix-portable"
+TOOL_SPEC="github:DavHau/nix-portable"
+
+#what the user's environment sets for nix reaches it, but for where nix keeps
+#state, which is this channel's directory, and three more: NP_RUN replaces how
+#nix-portable confines nix, root included; NP_DEBUG writes the environment into
+#/tmp; BASH_ENV runs before nix-portable, a bash script, its output landing in
+#front of the store paths read back. A store in NIX_CONFIG made nix-portable's
+#nix open one elsewhere and fail to start. require-sigs = false reaches nix:
+#fetching unsigned is the user's to decide (owner, 2026-09-16)
+unset NIX_REMOTE NIX_STORE NIX_STORE_DIR NIX_STATE_DIR NIX_LOG_DIR NIX_DATA_DIR NIX_CONF_DIR \
+    NIX_DAEMON_SOCKET_PATH NIX_BIN_DIR NIX_LIBEXEC_DIR NP_CONF_STORE NP_DEBUG NP_RUN BASH_ENV
+if [ -n "${NIX_CONFIG}" ]; then
+    NIX_CONFIG="$(printf "%s\\n" "${NIX_CONFIG}" | awk '{k = $0; sub(/^[ \t]+/, "", k); sub(/[ \t]*=.*$/, "", k)} k != "store"')"
+    export NIX_CONFIG
+fi
+
+_platform() {
+    _util_machine_in
+    case "${_util_machine_in__os}/${_util_machine_in__cpu}" in
+        Linux/x86_64|Linux/amd64)  printf "%s\\n" "x86_64-linux" ;;
+        Linux/aarch64|Linux/arm64) printf "%s\\n" "aarch64-linux" ;;
+        *) return 1 ;;
+    esac
+}
+
+_release_of() {
+    #$1 => the channel. Its release, then the url of that release's nixexprs.tar.xz
+    #    _release_of https://channels.nixos.org/nixos-unstable  =>  nixos-25.11pre869843.4c8cdd5b1a63
+    #                                                               https://releases.nixos.org/nixos/unstable/nixos-25.11pre869843.4c8cdd5b1a63/nixexprs.tar.xz
+    if _util_is_local "${1}"; then
+        _ro__url="${1#file://}/nixexprs.tar.xz"
+        [ -f "${_ro__url}" ] || return 1
+        _ro__release="$(TAR_OPTIONS= tar -tJf "${_ro__url}" 2>/dev/null | awk -F/ 'NR == 1 {print $1; exit}')"
+    else
+        _api_fetcher_head_in "${1}/nixexprs.tar.xz" location "" || return 1
+        _ro__url="${_api_fetcher_head_in__out}"
+        case "${_ro__url}" in
+            http://*/nixexprs.tar.xz|https://*/nixexprs.tar.xz) ;;
+            *) return 1 ;;
+        esac
+        _ro__release="${_ro__url%/nixexprs.tar.xz}"; _ro__release="${_ro__release##*/}"
+    fi
+    _api_is_version "${_ro__release}" || return 1
+    printf "%s\\n%s\\n" "${_ro__release}" "${_ro__url}"
+}
+
+_counts() {
+    printf "packages=%s\\n" "$(awk -F'\t' '!seen[$2]++' "${INDEX}" | awk 'END {print NR}')"
+    printf "names=%s\\n" "$(awk -F'\t' '!seen[$1]++' "${INDEX}" | awk 'END {print NR}')"
+}
+
+_resolve() {
+    #$1 => a program's name or nixpkgs.ATTR, $2 => the program asked for
+    #    _resolve figlet figlet          =>  0, attr figlet, cmd figlet
+    #    _resolve htop htop              =>  3, cands htop and htop-vim
+    #    _resolve nixpkgs.htop-vim htop  =>  0, attr htop-vim, cmd htop
+    _resolve__name="${1}"; _resolve__want="${2}"
+    why=""; attr=""; cmd=""; cands=""; noindex=""
+    if [ ! -s "${INDEX}" ] || [ ! -s "${RELEASE}" ]; then
+        why="${NO_INDEX}"; noindex="1"
+        return 2
+    fi
+    case "${_resolve__name}" in
+        nixpkgs.?*)
+            cmd="$(LC_ALL=C awk -F'\t' -v a="${_resolve__name#nixpkgs.}" -v want="${_resolve__want}" '
+                $2 == a {
+                    if (first == "") first = $1
+                    if ($1 == want) hit = $1
+                    n = split(a, p, "."); if ($1 == p[n]) own = $1
+                }
+                END { if (hit != "") print hit; else if (own != "") print own
+                      else if (first != "") print first }' "${INDEX}")"
+            [ -z "${cmd}" ] && return 1
+            attr="${_resolve__name#nixpkgs.}"
+            return 0 ;;
+    esac
+    cands="$(LC_ALL=C awk -F'\t' -v n="${_resolve__name}" '$1 == n {print $2}' "${INDEX}")"
+    [ -z "${cands}" ] && return 1
+    _util_is_one_line "${cands}" || return 3
+    attr="${cands}"; cmd="${_resolve__name}"; return 0
+}
+
+_run_tool() {
+    #$1... => a nix command, run with nix-portable's state in this channel
+    _rt__tool="$(readlink "${CMDFOUND_REQUIRED}" 2>/dev/null)" || _rt__tool="${CMDFOUND_REQUIRED}"
+    #this machine's git, or nix-portable fetches its own on first start, 22 MB
+    if [ -z "${NP_GIT}" ] && _rt__git="$(command -v git 2>/dev/null)"; then
+        NP_GIT="${_rt__git}"; export NP_GIT
+    fi
+    (
+        _api_tool_home
+        exec env NP_LOCATION="${CH}" PROOT_TMP_DIR="${CH}/tmp" "${_rt__tool}" "${@}"
+    )
+}
+
+_in_store() {
+    #$1 => a /nix path, its links followed as the program's namespace would
+    #    _in_store /nix/store/0f7…-htop-3.4.1/bin/htop  =>  0
+    #    _in_store /nix/store/0f7…-htop-3.4.1/share     =>  1
+    _is__path="${1}"; _is__rest="${_is__path#/}"; _is__done=""; _is__hops="0"
+    while [ -n "${_is__rest}" ]; do
+        case "${_is__rest}" in
+            */*) _is__part="${_is__rest%%/*}"; _is__rest="${_is__rest#*/}" ;;
+              *) _is__part="${_is__rest}"; _is__rest="" ;;
+        esac
+        case "${_is__part}" in
+            ''|.) continue ;;
+            ..) _is__done="${_is__done%/*}"; continue ;;
+        esac
+        case "${_is__done}/${_is__part}" in
+            /nix|/nix/*) _is__host="${NP}${_is__done}/${_is__part}" ;;
+                      *) _is__host="${_is__done}/${_is__part}" ;;
+        esac
+        if [ -L "${_is__host}" ]; then
+            _is__hops="$((_is__hops + 1))"
+            [ "${_is__hops}" -gt "40" ] && return 1
+            _is__link="$(readlink "${_is__host}")" || return 1
+            case "${_is__link}" in
+                /*) _is__done=""; _is__rest="${_is__link#/}${_is__rest:+/${_is__rest}}" ;;
+                 *) _is__rest="${_is__link}${_is__rest:+/${_is__rest}}" ;;
+            esac
+            continue
+        fi
+        _is__done="${_is__done}/${_is__part}"
+    done
+    case "${_is__done}" in
+        /nix|/nix/*) _is__host="${NP}${_is__done}" ;;
+                  *) _is__host="${_is__done}" ;;
+    esac
+    [ -f "${_is__host}" ] && [ -x "${_is__host}" ]
+}
+
+_closure_bytes() {
+    #$1 => a placement's root directory, the bytes its roots keep in the store
+    #    _closure_bytes "${CH}/.nix-portable/nix/var/nix/gcroots/cmdfound/htop/${release}"  =>  41943040
+    _cb__out="$(_run_tool nix path-info --recursive --size "${1}"/result*)" || return 1
+    printf "%s\\n" "${_cb__out}" | awk '
+        $1 ~ /^\/nix\/store\/[^\/]+$/ && $NF ~ /^[0-9]+$/ { size[$1] = $NF }
+        END { for (p in size) { t += size[p]; n++ } if (!n) exit 1; printf("%.0f\n", t) }'
+}
+
+_sweep() {
+    #removes the work directories whose process died halfway
+    for _sw__dir in "${CH}"/nixpkgs/.[!.]* "${CH}"/index/work.*; do
+        [ -d "${_sw__dir}" ] || continue
+        _sw__pid="${_sw__dir##*.}"
+        _util_is_number "${_sw__pid}" || continue
+        kill -0 "${_sw__pid}" 2>/dev/null && continue
+        _util_removable "${_sw__dir}"; rm -rf "${_sw__dir}"
+    done
+}
+
+_tree() {
+    #$1 => a release, its nixpkgs unpacked on first use
+    #    _tree nixos-25.11pre869843.4c8cdd5b1a63  =>  ${CH}/nixpkgs/nixos-25.11pre869843.4c8cdd5b1a63
+    _tr__tree="${CH}/nixpkgs/${1}"
+    [ -f "${_tr__tree}/default.nix" ] && { printf "%s\\n" "${_tr__tree}"; return 0; }
+    _tr__tarball="${CH}/index/${1}.tar.xz"
+    [ -f "${_tr__tarball}" ] || return 1
+    _sweep
+    printf "%s\\n" "${SELF_NAME}: unpacking the nixpkgs of ${1}, once for this release" >&2
+    _tr__work="${CH}/nixpkgs/.${1}.$$"
+    rm -rf "${_tr__work}"; _util_mkdir_p "${_tr__work}" || return 1
+    if ! TAR_OPTIONS= tar -xJf "${_tr__tarball}" -C "${_tr__work}" || [ ! -f "${_tr__work}/${1}/default.nix" ]; then
+        rm -rf "${_tr__work}"
+        return 1
+    fi
+    #another install may have unpacked it meanwhile
+    mv "${_tr__work}/${1}" "${_tr__tree}" 2>/dev/null
+    rm -rf "${_tr__work}"
+    [ -f "${_tr__tree}/default.nix" ] || return 1
+    rm -f "${_tr__tarball}"
+    printf "%s\\n" "${_tr__tree}"
+}
+
+_namespaces() {
+    #leaves in namespaces what decides whether bwrap may run here, builtins only
+
+    #_launcher's sed copies this into every launcher, by its first line as written
+    _ns__boot=""; _ns__max=""; _ns__clone=""; _ns__apparmor=""; _ns__map=""; _ns__seccomp=""
+    { read -r _ns__boot < /proc/sys/kernel/random/boot_id; } 2>/dev/null
+    { read -r _ns__max < /proc/sys/user/max_user_namespaces; } 2>/dev/null
+    { read -r _ns__clone < /proc/sys/kernel/unprivileged_userns_clone; } 2>/dev/null
+    { read -r _ns__apparmor < /proc/sys/kernel/apparmor_restrict_unprivileged_userns; } 2>/dev/null
+    { read -r _ns__map < /proc/self/uid_map; } 2>/dev/null
+    { while IFS=: read -r _ns__key _ns__value; do
+          case "${_ns__key}" in Seccomp) _ns__seccomp="${_ns__value}"; break ;; esac
+      done < /proc/self/status; } 2>/dev/null
+    namespaces="${_ns__boot} ${_ns__max} ${_ns__clone} ${_ns__apparmor} ${_ns__map} ${_ns__seccomp}"
+}
+
+_launcher() {
+    #$1 => the launcher, $2 => the program's /nix path, $3 => what it is
+    #1, writing nothing, when neither bwrap nor proot runs here
+    _l__path="${1}"; _l__program="${2}"; _l__what="${3}"
+    _l__bwrap=""; _l__proot=""
+    if [ -x "${NP}/bin/bwrap" ] && [ -d "${NP}/emptyroot" ] && [ -d "${NP}/nix/store" ] && \
+       "${NP}/bin/bwrap" --dev-bind / / true 2>/dev/null; then
+        _l__bwrap="1"
+        _namespaces; printf "%s\\n" "${namespaces}" > "${CH}/run/.bwrap" 2>/dev/null
+    fi
+    if [ -x "${NP}/bin/proot" ] && [ -d "${NP}/emptyroot" ] && [ -d "${NP}/nix/store" ] && \
+       PROOT_NO_SECCOMP="1" PROOT_TMP_DIR="${CH}/tmp" "${NP}/bin/proot" -r / true 2>/dev/null; then
+        _l__proot="1"
+    fi
+    [ -n "${_l__bwrap}${_l__proot}" ] || return 1
+    {
+        printf "%s\\n" "#!/bin/sh" "#written by cmdfound: ${_l__what}, run from nix-portable's store"
+        printf 'np="%s"\nch="%s"\nprogram="%s"\n' "${NP}" "${CH}" "${_l__program}"
+        sed -n '/^_namespaces() {$/,/^}$/p' "${SELF}"
+        cat <<'LAUNCHER'
+
+#bwrap, where this machine let it make a namespace in the same circumstances. It
+#is told to take the program with it when it dies: it does not pass signals on,
+#and a SIGTERM sent to it would otherwise leave the program running
+if [ -x "${np}/bin/bwrap" ] && [ -d "${np}/emptyroot" ] && [ -d "${np}/nix/store" ]; then
+    _namespaces; here="${namespaces}"
+    known=""; { read -r known < "${ch}/run/.bwrap"; } 2>/dev/null
+    if [ X"${known}" != X"${here}" ] && "${np}/bin/bwrap" --dev-bind / / true 2>/dev/null; then
+        printf "%s\n" "${here}" > "${ch}/run/.bwrap" 2>/dev/null; known="${here}"
+    fi
+    if [ X"${known}" = X"${here}" ]; then
+        unset CMDFOUND_NIX_PORTABLE_STARTED
+        set -- -- "${program}" "$@"
+        for top in /*; do
+            case "${top}" in /nix|/dev) continue ;; esac
+            [ -e "${top}" ] && set -- --bind "${top}" "${top}" "$@"
+        done
+        exec "${np}/bin/bwrap" --die-with-parent --bind "${np}/emptyroot" / --dev-bind /dev /dev --bind "${np}/nix" /nix "$@"
+    fi
+fi
+#proot, nix-portable's way where a namespace cannot be made: slower, and nothing
+#it keeps goes to /tmp
+if [ -x "${np}/bin/proot" ] && [ -d "${np}/emptyroot" ] && [ -d "${np}/nix/store" ]; then
+    unset CMDFOUND_NIX_PORTABLE_STARTED
+    [ -d "${ch}/tmp" ] || mkdir -p "${ch}/tmp"
+    set -- "${program}" "$@"
+    for top in /*; do
+        case "${top}" in /nix|/dev|*:*) continue ;; esac
+        [ -e "${top}" ] && set -- -b "${top}:${top}" "$@"
+    done
+    PROOT_NO_SECCOMP="1"; PROOT_TMP_DIR="${ch}/tmp"; export PROOT_NO_SECCOMP PROOT_TMP_DIR
+    exec "${np}/bin/proot" -r "${np}/emptyroot" -b /dev:/dev -b "${np}/nix:/nix" -w "${PWD:-/}" "$@"
+fi
+#neither is where nix-portable unpacks them, as after nix-portable was updated:
+#nix-portable unpacks what it needs when it starts, and then this runs again, once
+tool="$(readlink "${ch}/tool/current" 2>/dev/null)"
+if [ -z "${CMDFOUND_NIX_PORTABLE_STARTED}" ] && [ -x "${tool}" ]; then
+    mkdir -p "${ch}/home" "${ch}/tmp" 2>/dev/null
+    env NP_LOCATION="${ch}" HOME="${ch}/home" TMPDIR="${ch}/tmp" PROOT_TMP_DIR="${ch}/tmp" \
+        XDG_CACHE_HOME="${ch}/home/.cache" XDG_CONFIG_HOME="${ch}/home/.config" \
+        XDG_DATA_HOME="${ch}/home/.local/share" XDG_STATE_HOME="${ch}/home/.local/state" \
+        "${tool}" nix --version > /dev/null 2>&1
+    CMDFOUND_NIX_PORTABLE_STARTED="1"; export CMDFOUND_NIX_PORTABLE_STARTED
+    exec "${0}" "$@"
+fi
+#nothing here can run it. The launcher goes, so that cmdfound, which
+#remembered it, installs the program again the next time it is asked for
+printf "%s\n" "${0##*/}: nix-portable cannot run ${program##*/} from ${np} any more; cmdfound installs it again the next time" >&2
+rm -f "${0}"
+exit 127
+LAUNCHER
+    } | _util_write_aside "${_l__path}" 755
+}
+
+_undo() {
+    #an obtain's EXIT trap: removes what made and made_run still name
+    [ -n "${made_run}" ] && rmdir "${made_run}" "${made_run%/*}" 2>/dev/null
+    [ -n "${made}" ] || return 0
+    rm -rf "${made}"; rmdir "${made%/*}" 2>/dev/null
+}
+
+_meta() {
+    printf "%s\\n" "kind=artifact" "confines=no" "describes=self" "manager=${TOOL_SPEC}" "needs=sqlite3" "reclaims=yes"
+    exit 0
+}
+
+_index() {
+    #$1 => bytes, to only say what fetching the catalog downloads
+    mode="${1}"
+    system="$(_platform)" || _api_answer_unreachable "nixpkgs has no catalog for ${_util_machine_in__os}/${_util_machine_in__cpu}"
+    if [ X"${mode}" = X"bytes" ]; then
+        _ib__answer="$(_release_of "${CHANNEL}")" || exit 0
+        _api_answer_bytes_of "${_ib__answer#*${NL}}"
+    fi
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        _api_answer_unreachable "sqlite3 is not here to read the catalog with"
+    fi
+    _util_mkdir_p "${CH}/index" || exit 1
+    answer="$(_release_of "${CHANNEL}")" || {
+        _api_answer_unreachable "which release ${CHANNEL} is at could not be read"
+    }
+    release="${answer%%${NL}*}"; url="${answer#*${NL}}"
+
+    have=""; IFS= read -r have 2>/dev/null < "${RELEASE}"
+    if [ X"${have}" = X"${release}" ] && [ -s "${INDEX}" ] && \
+       { [ -f "${CH}/index/${release}.tar.xz" ] || [ -f "${CH}/nixpkgs/${release}/default.nix" ]; }; then
+        _counts
+        exit 0
+    fi
+
+    kept="${CH}/index/${release}.tar.xz.part"; part="${kept}.$$"
+    for old in "${CH}"/index/*.part; do
+        [ -f "${old}" ] && [ X"${old}" != X"${kept}" ] && rm -f "${old}"
+    done
+    _api_fetcher_resumable "${url}" "${kept}"
+    case "${?}" in
+        0) ;;
+        1) _api_answer_unreachable "there is no catalog at ${url}" ;;
+        *) _api_answer_unreachable "the catalog of ${release} ${CATALOG_STOPPED}" ;;
+    esac
+    bytes="$(wc -c < "${part}" | awk '{print $1}')"
+    #not cut short from here: the old index could be left half replaced
+    trap '' TERM INT HUP
+
+    work="${CH}/index/work.$$"
+    rm -rf "${work}"; _util_mkdir_p "${work}" || exit 1
+    if ! TAR_OPTIONS= tar -xJf "${part}" -C "${work}" "${release}/programs.sqlite" 2>/dev/null || \
+       [ ! -s "${work}/${release}/programs.sqlite" ]; then
+        rm -rf "${work}" "${part}"
+        _api_answer_unreachable "the catalog of ${release} came without its programs.sqlite, and is not kept"
+    fi
+    #-init /dev/null, or sqlite3 reads ~/.sqliterc first
+    if ! sqlite3 -batch -init /dev/null -noheader -separator "$(printf '\t')" "${work}/${release}/programs.sqlite" \
+         "SELECT name, package FROM Programs WHERE system = '${system}';" > "${work}/rows" 2>/dev/null; then
+        rm -rf "${work}"
+        _api_answer_unreachable "sqlite3 could not read the programs.sqlite of ${release}"
+    fi
+    LC_ALL=C awk -F'\t' '
+        NF == 2 && $1 != "." && $1 != ".." && $1 !~ /^nixpkgs\./ &&
+        $1 !~ /[^!-~]/ && $1 !~ /[\/:@"$`\\'\'']/ && $2 ~ /^[A-Za-z0-9_+-][A-Za-z0-9._+-]*$/
+    ' "${work}/rows" | LC_ALL=C sort -u > "${work}/programs.tsv"
+
+    _api_catalog_keep "${work}/programs.tsv" "${INDEX}" "$(awk -F'\t' '!seen[$1]++' "${work}/programs.tsv" | awk 'END {print NR}')" \
+        "the catalog of ${release}" "${work}" "${part}"
+    printf "%s\\n" "${release}" | _util_write_aside "${RELEASE}"
+    printf "%s\\n" "${url}" | _util_write_aside "${CH}/index/source"
+    mv "${part}" "${CH}/index/${release}.tar.xz"
+    rm -rf "${work}"
+    _sweep
+    for old in "${CH}"/index/*.tar.xz; do
+        [ -f "${old}" ] && [ X"${old}" != X"${CH}/index/${release}.tar.xz" ] && rm -f "${old}"
+    done
+    for old in "${CH}"/nixpkgs/*; do
+        [ -d "${old}" ] && [ X"${old##*/}" != X"${release}" ] && rm -rf "${old}"
+    done
+    _counts
+    printf "bytes=%s\\n" "${bytes}"
+    exit 0
+}
+
+_search() {
+    #$1... => the words looked for
+    #    _search vim  =>  nix-portable:nixpkgs.htop-vim<TAB>htop<TAB>provides htop
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    search_words="${*}" LC_ALL=C awk -F'\t' "${SEARCH_AWK}"'
+        { progs[$2] = progs[$2] " " $1; if (!($2 in first)) first[$2] = $1 }
+        END {
+            for (a in first)
+                if (words_in(a progs[a])) printf("nix-portable:nixpkgs.%s\t%s\tprovides%s\n", a, first[a], progs[a])
+        }' "${INDEX}" | LC_ALL=C sort
+    exit 0
+}
+
+_probe() {
+    #$1 => a program's name or nixpkgs.ATTR, $2 => a release
+    #    _probe figlet  =>  version=nixos-25.11pre869843.4c8cdd5b1a63
+    #                       package=nixpkgs.figlet
+    #                       requires=github:DavHau/nix-portable
+    [ -z "${1}" ] && exit 1
+    _platform >/dev/null || exit 1
+    _resolve "${1}" "${1}"; _api_answer_unresolved "${?}" "nixpkgs."
+    _util_has_word "${CMDFOUND_NO_MANAGER}" "${SELF_NAME}" && exit 1
+    IFS= read -r release < "${RELEASE}"
+    [ -n "${2}" ] && [ X"${2}" != X"${release}" ] && exit 1
+    printf "version=%s\\n" "${release}"
+    #no size: nix cannot tell one without evaluating nixpkgs
+    printf "package=nixpkgs.%s\\n" "${attr}"
+    printf "requires=%s\\n" "${TOOL_SPEC}"
+    exit 0
+}
+
+_locate() {
+    #$1 => a program's name or nixpkgs.ATTR, $2 => a release, $3 => the program asked for
+    #    _locate figlet "${release}" figlet  =>  url=https://releases.nixos.org/nixos/unstable/${release}/nixexprs.tar.xz
+    #                                            bin=figlet
+    [ -z "${1}" ] || [ -z "${2}" ] && exit 1
+    _platform >/dev/null || exit 1
+    _resolve "${1}" "${3}"; _api_answer_unresolved "${?}" "nixpkgs."
+    IFS= read -r url 2>/dev/null < "${CH}/index/source" && \
+        printf "url=%s\\n" "${url}"
+    printf "bin=%s\\n" "${cmd}"
+    exit 0
+}
+
+_obtain() {
+    #$1 => a program's name or nixpkgs.ATTR, $2 => a release, $3 => the program asked for
+    name="${1}"; ver="${2}"; want="${3}"
+    [ -z "${name}" ] || [ -z "${ver}" ] && exit 1
+    _resolve "${name}" "${want}"; _api_answer_unresolved "${?}" "nixpkgs."
+    if [ ! -x "${CMDFOUND_REQUIRED}" ]; then
+        _api_answer_unreachable "nix-portable is not available to install nixpkgs.${attr}"
+    fi
+    IFS= read -r release < "${RELEASE}"
+    if [ X"${ver}" != X"${release}" ]; then
+        _api_answer_failed "the local catalog is ${release} now, not ${ver}; asking again installs from it"
+    fi
+    _api_is_unsafe "${CH}" && _api_answer_failed "${LAUNCHER_UNSAFE}"
+    _api_is_program_name "${cmd}" || \
+        _api_answer_failed "'${cmd}' is not a program this channel will write a launcher for"
+    made=""; made_run=""
+    _util_trap_exit '_undo; _util_removable "${NP}/nix/store"'
+    [ -x "${NP}/bin/bwrap" ] || \
+        printf "%s\\n" "${SELF_NAME}: starting for the first time here, which takes a minute or two" >&2
+    tree="$(_tree "${release}")" || {
+        _api_answer_failed "the nixpkgs of ${release} is not here to install from, --index-update nix-portable fetches it again"
+    }
+
+    paths="$(_run_tool nix eval --read-only --max-jobs 0 --raw -f "${tree}" --arg config '{}' --arg overlays '[]' "${attr}" \
+        --apply 'p: builtins.concatStringsSep "\n" (map (o: builtins.unsafeDiscardStringContext p.${o}.outPath) (p.meta.outputsToInstall or [ "out" ]))')"
+    if [ "${?}" -ne "0" ] || [ -z "${paths}" ]; then
+        _api_answer_failed "nix could not evaluate nixpkgs.${attr} in ${release}"
+    fi
+    root="${NP}/nix/var/nix/gcroots/cmdfound/${attr}/${release}"
+    [ -d "${root}" ] || made="${root}"
+    _util_mkdir_p "${root}" || exit 1
+    if ! _run_tool nix build --max-jobs 0 --out-link "${root}/result" ${paths} >/dev/null; then
+        #nix fails alike for a path the cache lacks and an unreachable cache
+        cache="https://cache.nixos.org"
+        asked="$(_run_tool nix path-info --store "${cache}" \
+                 ${paths} 2>&1)"
+        if [ "${?}" -eq "0" ]; then
+            _api_answer_failed "nix could not install nixpkgs.${attr} from ${release}, which ${cache} has"
+        fi
+        case "${asked}" in
+            *"is not valid"*)
+                printf "unreachable=%s\\n" "nixpkgs.${attr} of ${release} is not in the binary cache, ${cache}, and nothing is compiled here" ;;
+            *)
+                printf "unreachable=%s\\n" "${cache} could not be asked for nixpkgs.${attr}" ;;
+        esac
+        exit 2
+    fi
+
+    store=""
+    for link in "${root}"/result*; do
+        target="$(readlink "${link}" 2>/dev/null)" || continue
+        case "${target}" in /nix/store/?*) ;; *) continue ;; esac
+        for dir in bin sbin; do
+            if [ -z "${store}" ] && _in_store "${target}/${dir}/${cmd}"; then
+                store="${target}/${dir}/${cmd}"
+            fi
+        done
+    done
+    if [ -z "${store}" ] || _api_is_unsafe "${store}"; then
+        _api_answer_failed "nix installed nixpkgs.${attr} but it has no program called ${cmd}"
+    fi
+    run="${CH}/run/${attr}/${release}"
+    [ -d "${run}" ] || made_run="${run}"
+    _util_mkdir_p "${run}" || exit 1
+    if ! _launcher "${run}/${cmd}" "${store}" "${cmd}, from nixpkgs.${attr} of ${release}"; then
+        _api_answer_failed "neither bwrap nor proot runs from nix-portable's store here, so nothing it installed can run"
+    fi
+    made=""; made_run=""
+
+    sizes="${CH}/sizes/${attr}/${release}"
+    if [ ! -f "${sizes}" ] && _util_mkdir_p "${sizes%/*}" && bytes="$(_closure_bytes "${root}")"; then
+        printf "%s\\n" "${bytes}" | _util_write_aside "${sizes}"
+    fi
+
+    printf "program=%s\\n" "${run}/${cmd}"
+    store="${store#/nix/store/}"
+    printf "asset=%s\\n" "${store%%/*}"
+    printf "member=%s\\n" ".nix-portable/nix/var/nix/gcroots/cmdfound/${attr}/${release}" "sizes/${attr}/${release}"
+    exit 0
+}
+
+_size() {
+    #$1 => nixpkgs.ATTR, $2 => the release
+    #    _size nixpkgs.htop "${release}"  =>  bytes=41943040
+    spec="${1}"; release="${2}"; attr="${spec#nixpkgs.}"
+    case "${spec}" in nixpkgs.?*) ;; *) attr="" ;; esac
+    case "${attr}/${release}" in
+        ?*/?*) case "${attr}${release}" in *..*|*/*) attr="" ;; esac ;;
+        *) attr="" ;;
+    esac
+    if [ -z "${attr}" ]; then
+        _api_answer_unreachable "'${spec}@${release}' is not a package of this channel"
+    fi
+    sizes="${CH}/sizes/${attr}/${release}"
+    bytes=""
+    [ -f "${sizes}" ] && { read -r bytes < "${sizes}"; } 2>/dev/null
+    if _util_is_number "${bytes}"; then
+        printf "bytes=%s\\n" "${bytes}"; exit 0
+    fi
+    root="${NP}/nix/var/nix/gcroots/cmdfound/${attr}/${release}"
+    rooted=""
+    for link in "${root}"/result*; do
+        [ -L "${link}" ] && rooted="1"
+    done
+    if [ -z "${rooted}" ]; then
+        _api_answer_unreachable "nixpkgs.${attr} of ${release} holds nothing in the store here"
+    fi
+    if [ ! -x "${CMDFOUND_REQUIRED}" ]; then
+        _api_answer_unreachable "nix-portable is not here to say what nixpkgs.${attr} holds"
+    fi
+    _util_trap_exit '_util_removable "${NP}/nix/store"'
+    if ! bytes="$(_closure_bytes "${root}")"; then
+        _api_answer_unreachable "nix could not say what nixpkgs.${attr} holds"
+    fi
+    printf "bytes=%s\\n" "${bytes}"
+    exit 0
+}
+
+_reclaim() {
+    if [ X"${CMDFOUND_RECLAIM}" = X"all" ]; then
+        _util_removable "${NP}/nix/store"
+        printf "freed=%s\\n" "0"
+        exit 0
+    fi
+    _util_trap_exit '_util_removable "${NP}/nix/store"'
+    if [ ! -x "${CMDFOUND_REQUIRED}" ]; then
+        _api_answer_unreachable "nix-portable is not here to delete from its store"
+    fi
+    work="${CH}/tmp/reclaim.$$"; _util_mkdir_p "${CH}/tmp" || exit 1
+    #roots the git nix-portable fetched, first on the PATH of its script
+    tool="$(readlink "${CMDFOUND_REQUIRED}" 2>/dev/null)" || tool="${CMDFOUND_REQUIRED}"
+    own="${NP}/nix/var/nix/gcroots/cmdfound-nix-portable"
+    rm -rf "${own}"; _util_mkdir_p "${own}" || exit 1
+    for path in $(grep -a -m1 -o 'export PATH="/nix/store/[a-z0-9]\{32\}-git[A-Za-z0-9._+-]*/bin:' "${tool}" | \
+                  sed 's|^export PATH="||; s|/bin:$||'); do
+        [ -d "${NP}${path}" ] && ln -s "${path}" "${own}/${path##*/}"
+    done
+    if ! _run_tool nix-store --gc --print-dead > "${work}.dead" 2> "${work}.log" || \
+       ! _run_tool nix path-info --all \
+         > "${work}.valid" 2>> "${work}.log"; then
+        rm -f "${work}.dead" "${work}.valid" "${work}.log"
+        _api_answer_unreachable "nix could not say what the packages still here need, so nothing was deleted"
+    fi
+    doomed="$(LC_ALL=C sort -u "${work}.dead" | awk '/^\/nix\/store\/[^\/]+$/' > "${work}.d"
+        LC_ALL=C sort -u "${work}.valid" | LC_ALL=C comm -12 "${work}.d" -)"
+    rm -f "${work}.dead" "${work}.valid" "${work}.d"
+    freed="0"
+    if [ -n "${doomed}" ]; then
+        freed="$(for path in ${doomed}; do du -sk "${NP}${path}" 2>/dev/null || printf "%s\\n" "-"; done | \
+            awk '$1 !~ /^[0-9]+$/ {unknown = 1} {t += $1} END {if (!unknown) print t * 1024}')"
+        if ! _run_tool nix-store --delete ${doomed} \
+             >> "${work}.log" 2>&1; then
+            printf "unreachable=%s\\n" "nix would not delete what nothing needed a moment ago: $(awk '/error/ {e = $0} END {print e}' "${work}.log")"
+            rm -f "${work}.log"
+            exit 2
+        fi
+    fi
+    rm -f "${work}.log"
+    [ -n "${freed}" ] && printf "freed=%s\\n" "${freed}"
+    exit 0
+}
+
+case "${1}" in
+    meta)    _meta ;;
+    index)   _index "${2}" ;;
+    search)  shift; _search "${@}" ;;
+    probe)   _probe "${2}" "${3}" ;;
+    locate)  _locate "${2}" "${3}" "${4}" ;;
+    obtain)  _obtain "${2}" "${3}" "${4}" ;;
+    size)    _size "${2}" "${3}" ;;
+    reclaim) _reclaim ;;
+    *) printf "%s\\n" "usage: ${SELF_NAME} meta|index|search|probe|locate|obtain|size|reclaim" >&2; exit 1 ;;
+esac

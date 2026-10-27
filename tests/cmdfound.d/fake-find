@@ -1,0 +1,18 @@
+#a stand-in for find, for the cmdfound tests, copied as find where a test needs
+#a find with no GNU extensions. It refuses -lname and -ilname the way busybox's
+#find does - nothing on stdout, "find: unrecognized: -lname" on stderr, status
+#1 - and hands everything else to the find of this machine, named in
+#FAKE_FIND_REAL because it is itself called find and would otherwise run
+#itself. Measured against busybox 1.37.0 in alpine:3.22; BSD's find has no
+#-lname either.
+#
+#It is not a channel and is not executable, like the other fake-* files here:
+#it is copied where a test needs it
+for _ff__a in "${@}"; do
+    case "${_ff__a}" in
+        -lname|-ilname)
+            printf "%s\n" "find: unrecognized: ${_ff__a}" >&2
+            exit 1 ;;
+    esac
+done
+exec "${FAKE_FIND_REAL:-/usr/bin/find}" "${@}"

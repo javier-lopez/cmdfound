@@ -1,0 +1,207 @@
+#!/bin/sh
+#a stand-in for micromamba, for the cmdfound tests. It does what the
+#conda-forge channel asks of micromamba and nothing else, from a channel on
+#disk instead of conda-forge:
+#
+#  CHANNEL/solve/NAME          what solving NAME links, a line each, the package
+#                              itself last: name version build subdir, and
+#                              optionally the sha256 and the md5 the catalog
+#                              records for it, - for one it does not. Left out,
+#                              both are those of the package as it is on disk
+#  CHANNEL/SUBDIR/DIST.conda   each package, a tar holding the files it installs
+#
+#  [--rc-file F] [-r ROOT] create --dry-run --json -y -p PREFIX -c CHANNEL --override-channels SPEC
+#      answers what the solve links and what is still to be fetched, on one
+#      line, the way micromamba --json does. SPEC is NAME or NAME=VERSION, and
+#      a version is found when the package's starts with it
+#  [--rc-file F] [-r ROOT] create -y -p PREFIX --file EXPLICIT
+#  [--rc-file F] [-r ROOT] create -y -p PREFIX -c CHANNEL --override-channels SPEC
+#      installs. Each package is checked and refused on a mismatch: from a
+#      file, against the sum after its # - 64 characters a sha256, 32 an md5,
+#      and nothing at all when there is none, as micromamba does; from a spec,
+#      against what the catalog records. A package not in the cache yet is
+#      fetched: unpacked in ROOT/pkgs/SUBDIR/DIST with its info/index.json, as
+#      every conda package has, and its tarball beside it. One already there is
+#      reused. Its files, info/ left out, are linked into PREFIX by hard links,
+#      as micromamba links them, and it is recorded in
+#      PREFIX/conda-meta/DIST.json, which names the directory in the cache
+#      resolved as micromamba does; PREFIX is added to ~/.conda/environments.txt
+#  [--rc-file F] run -r ROOT -p PREFIX [-e KEY=VALUE]... PROGRAM ARGS...
+#      keeps a record under its cache and its activation script in TMPDIR,
+#      deactivates the environment CONDA_PREFIX names when it is another one,
+#      then runs PROGRAM with PREFIX/bin first on PATH, PREFIX's activation
+#      scripts sourced and each KEY=VALUE exported
+#  --version
+#
+#With MAMBA_DRY_RUN=true, or MAMBA_DOWNLOAD_ONLY=true, an install installs
+#nothing and exits 0, as micromamba 2.9 does; a run runs all the same.
+#FAKE_MICROMAMBA_OFFLINE=1 makes a solve fail the way a download does, and
+#FAKE_MICROMAMBA_VERSION tells two releases apart. FAKE_MICROMAMBA_LOG, when
+#set, records each call and the HOME micromamba itself saw, each package it
+#fetched as "fetch DIST", and
+#FAKE_MICROMAMBA_ENV the conda and mamba variables and the proxy it was handed
+
+log() { [ -n "${FAKE_MICROMAMBA_LOG}" ] && printf "%s\n" "${*}" >> "${FAKE_MICROMAMBA_LOG}"; }
+[ -n "${FAKE_MICROMAMBA_ENV}" ] && \
+    env | LC_ALL=C sort | awk '/^(CONDA|MAMBA)_|^(CONDARC|MAMBARC|https_proxy)=/ {printf("%s ", $0)} END {print ""}' >> "${FAKE_MICROMAMBA_ENV}"
+
+root="${MAMBA_ROOT_PREFIX}"
+while [ "${#}" -gt "0" ]; do
+    case "${1}" in
+        --rc-file) shift ;;
+        -r) shift; root="${1}" ;;
+        --version) printf "%s\n" "${FAKE_MICROMAMBA_VERSION:-9.9.9}"; exit 0 ;;
+        create|run) break ;;
+    esac
+    shift
+done
+cmd="${1}"; shift
+
+_rows() {
+    #$1 => channel, $2 => spec. The solve, a line each: name version build
+    #subdir fn url sha256 md5 size, - for a sum the catalog does not record
+    name="${2%%=*}"; want=""
+    case "${2}" in *=*) want="${2#*=}" ;; esac
+    [ -f "${1}/solve/${name}" ] || return 1
+    top="$(awk 'NF {l = $0} END {print l}' "${1}/solve/${name}")"
+    if [ -n "${want}" ]; then
+        case "$(printf "%s\n" "${top}" | awk '{print $2}')" in "${want}"*) ;; *) return 1 ;; esac
+    fi
+    while read -r n v b s sha md5; do
+        [ -n "${n}" ] || continue
+        f="${n}-${v}-${b}.conda"
+        [ -n "${sha}" ] || sha="$(sha256sum "${1}/${s}/${f}" | awk '{print $1}')"
+        [ -n "${md5}" ] || md5="$(md5sum "${1}/${s}/${f}" | awk '{print $1}')"
+        printf "%s %s %s %s %s %s %s %s %s\n" "${n}" "${v}" "${b}" "${s}" "${f}" "${1}/${s}/${f}" \
+            "${sha}" "${md5}" "$(wc -c < "${1}/${s}/${f}" | awk '{print $1}')"
+    done < "${1}/solve/${name}"
+}
+
+_entries() {
+    #$1 => rows. The json list micromamba writes for them
+    printf "%s\n" "${1}" | awk 'NF {
+        printf("%s{\"build\":\"%s\",\"channel\":\"conda-forge\",\"fn\":\"%s\",%s\"name\":\"%s\",%s\"size\":%s,\"subdir\":\"%s\",\"url\":\"%s\",\"version\":\"%s\"}",
+            (n++ ? "," : ""), $3, $5, ($8 == "-" ? "" : "\"md5\":\"" $8 "\","), $1,
+            ($7 == "-" ? "" : "\"sha256\":\"" $7 "\","), $9, $4, $6, $2)
+    }'
+}
+
+_fail() {
+    printf '{"log_history":[{"level":"error","message":"%s","source":"libmamba"},{"level":"critical","message":"%s","source":"libmamba"}],"success":false}\n' "${1}" "${2}"
+    exit 1
+}
+
+if [ X"${cmd}" = X"run" ]; then
+    prefix=""
+    while [ "${#}" -gt "0" ]; do
+        case "${1}" in
+            -r) shift; root="${1}" ;;
+            -p) shift; prefix="${1}" ;;
+            -e) shift; set_env="${set_env}
+${1}" ;;
+            *) break ;;
+        esac
+        shift
+    done
+    mkdir -p "${XDG_CACHE_HOME:-${HOME}/.cache}/mamba/proc"
+    #micromamba writes the script it activates with in TMPDIR, and a
+    #micromamba that is killed leaves it there, as this one always does
+    [ -n "${TMPDIR}" ] && : > "${TMPDIR}/mambaf$$"
+    log "run HOME=${HOME} TMPDIR=${TMPDIR-unset}"
+    #an environment already active is deactivated first, as micromamba does:
+    #its deactivation scripts run and its bin leaves PATH
+    if [ -n "${CONDA_PREFIX}" ] && [ X"${CONDA_PREFIX}" != X"${prefix}" ]; then
+        for s in "${CONDA_PREFIX}"/etc/conda/deactivate.d/*.sh; do
+            [ -f "${s}" ] && . "${s}"
+        done
+        PATH="$(printf "%s\n" "${PATH}" | tr ':' '\n' | awk -v d="${CONDA_PREFIX}/bin" '$0 != d' | paste -sd: -)"
+    fi
+    while IFS= read -r kv; do
+        [ -n "${kv}" ] && export "${kv}"
+    done <<EOF
+${set_env}
+EOF
+    PATH="${prefix}/bin:${PATH}"; CONDA_PREFIX="${prefix}"; export PATH CONDA_PREFIX
+    for s in "${prefix}"/etc/conda/activate.d/*.sh; do
+        [ -f "${s}" ] && . "${s}"
+    done
+    exec "${@}"
+fi
+
+[ X"${cmd}" = X"create" ] || exit 2
+dry=""; prefix=""; channel=""; file=""; spec=""
+while [ "${#}" -gt "0" ]; do
+    case "${1}" in
+        --dry-run) dry="1" ;;
+        --json|-y|--override-channels) ;;
+        -p) shift; prefix="${1}" ;;
+        -c) shift; channel="${1}" ;;
+        --file) shift; file="${1}" ;;
+        -*) ;;
+        *) spec="${1}" ;;
+    esac
+    shift
+done
+
+if [ -n "${FAKE_MICROMAMBA_OFFLINE}" ]; then
+    log "create-offline ${spec}"
+    _fail "Download error (7) Could not connect to server [${channel}/noarch/repodata.json.zst]" \
+          "Multiple errors occurred: Download error (7) Could not connect to server"
+fi
+
+if [ -n "${file}" ]; then
+    log "create-explicit ${prefix} HOME=${HOME}"
+    rows="$(awk 'NF && $0 !~ /^@/ {
+        url = $0; sum = ""; if (index(url, "#")) { sum = substr(url, index(url, "#") + 1); url = substr(url, 1, index(url, "#") - 1) }
+        f = url; sub(/^.*\//, "", f); d = f; sub(/\.(conda|tar\.bz2)$/, "", d)
+        s = url; sub(/\/[^\/]*$/, "", s); sub(/^.*\//, "", s)
+        b = d; sub(/^.*-/, "", b); nv = d; sub(/-[^-]*$/, "", nv); v = nv; sub(/^.*-/, "", v); n = nv; sub(/-[^-]*$/, "", n)
+        sha = "-"; md5 = "-"
+        if (length(sum) == 32) md5 = sum; else if (sum != "") sha = sum
+        printf("%s %s %s %s %s %s %s %s -\n", n, v, b, s, f, url, sha, md5)
+    }' "${file}")"
+else
+    rows="$(_rows "${channel}" "${spec}")" || \
+        _fail "Could not solve for environment specs\n    The following package could not be installed\n    └─ ${spec} does not exist (perhaps a typo or a missing channel)." \
+              "Could not solve for environment specs"
+    if [ -n "${dry}" ]; then
+        log "create-dry ${spec} HOME=${HOME}"
+        fetch="$(printf "%s\n" "${rows}" | while read -r n v b s f u sha md5 z; do
+            [ -d "${root}/pkgs/${s}/${n}-${v}-${b}" ] || printf "%s\n" "${n} ${v} ${b} ${s} ${f} ${u} ${sha} ${md5} ${z}"
+        done)"
+        printf '{"actions":{"FETCH":[%s],"LINK":[%s],"PREFIX":"%s"},"dry_run":true,"prefix":"%s","success":true}\n' \
+            "$(_entries "${fetch}")" "$(_entries "${rows}")" "${prefix}" "${prefix}"
+        exit 0
+    fi
+    log "create ${spec} ${prefix} HOME=${HOME}"
+fi
+[ X"${MAMBA_DRY_RUN}" = X"true" ] && exit 0
+[ X"${MAMBA_DOWNLOAD_ONLY}" = X"true" ] && exit 0
+
+mkdir -p "${prefix}/conda-meta" "${root}/pkgs" || exit 1
+printf "%s\n" "${rows}" | while read -r n v b s f u sha md5 z; do
+    [ -n "${n}" ] || continue
+    if [ X"${sha}" != X"-" ]; then
+        [ X"$(sha256sum "${u}" | awk '{print $1}')" = X"${sha}" ] || {
+            printf "%s\n" "File not valid: SHA256 doesn't match expectation ${u}" >&2; exit 1; }
+    elif [ X"${md5}" != X"-" ]; then
+        [ X"$(md5sum "${u}" | awk '{print $1}')" = X"${md5}" ] || {
+            printf "%s\n" "File not valid: MD5 doesn't match expectation ${u}" >&2; exit 1; }
+    fi
+    d="${root}/pkgs/${s}/${n}-${v}-${b}"
+    if [ ! -d "${d}" ]; then
+        log "fetch ${n}-${v}-${b}"
+        mkdir -p "${d}/info" && tar -xf "${u}" -C "${d}" && cp "${u}" "${d%/*}/${f}" || exit 1
+        printf '{"build":"%s","name":"%s","subdir":"%s","version":"%s"}\n' "${b}" "${n}" "${s}" "${v}" > "${d}/info/index.json"
+    fi
+    (cd "${d}" && find . ! -type d ! -path './info/*' | sed 's|^\./||') | while IFS= read -r p; do
+        case "${p}" in */*) mkdir -p "${prefix}/${p%/*}" || exit 1 ;; esac
+        ln -f "${d}/${p}" "${prefix}/${p}" || exit 1
+    done || exit 1
+    files="$(cd "${d}" && find . ! -type d ! -path './info/*' | sed 's|^\./||' | LC_ALL=C sort | awk '{printf("%s\"%s\"", (n++ ? "," : ""), $0)}')"
+    #micromamba records where it unpacked a package resolved, links and all
+    printf '{"build":"%s","extracted_package_dir":"%s","files":[%s],"fn":"%s","name":"%s","subdir":"%s","version":"%s"}\n' \
+        "${b}" "$(cd "${d}" && pwd -P)" "${files}" "${f}" "${n}" "${s}" "${v}" > "${prefix}/conda-meta/${n}-${v}-${b}.json"
+done || exit 1
+mkdir -p "${HOME}/.conda" && printf "%s\n" "${prefix}" >> "${HOME}/.conda/environments.txt"
+exit 0

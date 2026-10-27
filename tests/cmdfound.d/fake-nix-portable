@@ -1,0 +1,405 @@
+#!/bin/sh
+#a stand-in for nix-portable, for the cmdfound tests. It does what the
+#nix-portable channel asks of nix-portable and nix, and nothing else. Its
+#nixpkgs is fake-packages.tsv in the tree it is pointed at: one output of a
+#package a line, attribute, output and the programs in it, tab separated.
+#
+#  nix eval --read-only --raw -f TREE ... ATTR --apply ...
+#                           prints the store paths of the attribute's outputs,
+#                           and without --read-only writes a .drv into the
+#                           store, as nix does. A path is in the binary cache
+#                           unless its attribute is in FAKE_NIX_UNCACHED
+#  nix build --out-link LINK PATH...
+#                           fetches those paths from the cache, each a
+#                           directory with its programs, links LINK, LINK-1...
+#                           to them and roots the links. A path the cache does
+#                           not have is refused
+#  nix build --out-link LINK -f TREE ... ATTR
+#                           builds the attribute instead: the same, writing a
+#                           .drv, linking LINK and LINK-OUTPUT
+#  nix path-info --store URL PATH...
+#                           asks the binary cache: prints the paths it has, and
+#                           "path ... is not valid" for one it does not
+#  nix path-info --all      every path the store has registered
+#  nix path-info --recursive --size LINK...
+#                           every path the links reach, each with the bytes of
+#                           the files in it
+#  nix-store --query --requisites LINK...
+#                           the paths the links name and all they refer to
+#  nix-store --gc --print-dead
+#                           every entry of the store no root reaches, registered
+#                           or not, as nix prints them
+#  nix-store --delete PATH...
+#                           as nix does it: refuses a path a root reaches, and
+#                           one that a registered path left out of the list
+#                           still refers to; deletes the rest
+#
+#Like nix it keeps a register of the paths it placed and what each refers to:
+#every package refers to a libc, and a wrapper to what it wraps. A root is a
+#link under nix/var/nix/gcroots to a store path, or, in gcroots/auto, a link to
+#a link that still leads to one.
+#
+#FAKE_CACHE_DOWN=1 is a cache nobody reaches: fetching and asking both fail.
+#FAKE_NIX_QUERY_FAIL=1 is a store nix cannot be asked about: queries fail.
+#
+#The first run unpacks what nix-portable unpacks into NP_LOCATION/.nix-portable:
+#bwrap, proot, an empty root and a store holding nix-portable's own nix, which
+#nothing roots and nix never registered, read-only as nix-portable leaves it.
+#With FAKE_NP_INSTALL_GIT=1 it also fetches its own git, registered and
+#unrooted, as nix-portable does on a machine with no git; nix-portable's script
+#names that git on the line it puts it on the PATH with, which is this one:
+#export PATH="/nix/store/33333333333333333333333333333333-git-minimal-2.44.0/bin:$PATH"
+#Run as bwrap or proot it is that: the program's /nix path is read in the
+#directory mounted at /nix, and FAKE_IN_NAMESPACE says which one it ran in.
+#FAKE_BWRAP_BROKEN=1 is a machine where bwrap makes no namespace, FAKE_BWRAP_LOG
+#records what bwrap was given, and FAKE_PROOT_LOG the PROOT_TMP_DIR proot was
+#given. nix --version starts it, which unpacks bwrap and proot again when they
+#are gone, as nix-portable does after an update. FAKE_NP_LOG, when set, records
+#each call with HOME, XDG_CACHE_HOME, TMPDIR and PROOT_TMP_DIR, with the
+#settings of the user's that nix and nix-portable read, and with the variables
+#that would put nix's state somewhere else or run it some other way
+
+LIBC="/nix/store/00000000000000000000000000000000-fake-libc-1.0"
+OWN="/nix/store/11111111111111111111111111111111-nix-2.20.6"
+GIT="/nix/store/33333333333333333333333333333333-git-minimal-2.44.0"
+
+_mounted() {
+    #$1 => the directory mounted at /nix, then the program and its arguments.
+    #Links are followed a component at a time, an absolute one inside the
+    #mount, the way the namespace follows them: /nix is not there outside it
+    _m__nix="${1}"; shift
+    FAKE_IN_NAMESPACE="${0##*/}"; export FAKE_IN_NAMESPACE
+    #a name with no slash is looked for on the PATH, as exec does
+    case "${1}" in */*) ;; *) exec "${@}" ;; esac
+    _m__rest="${1#/}"; shift
+    _m__done=""; _m__hops="0"
+    while [ -n "${_m__rest}" ]; do
+        case "${_m__rest}" in
+            */*) _m__part="${_m__rest%%/*}"; _m__rest="${_m__rest#*/}" ;;
+              *) _m__part="${_m__rest}"; _m__rest="" ;;
+        esac
+        case "${_m__done}/${_m__part}" in
+            /nix|/nix/*) _m__host="${_m__nix}${_m__done#/nix}/${_m__part}" ;;
+                      *) _m__host="${_m__done}/${_m__part}" ;;
+        esac
+        if [ -L "${_m__host}" ] && [ "${_m__hops}" -lt "40" ]; then
+            _m__hops="$((_m__hops + 1))"; _m__link="$(readlink "${_m__host}")"
+            case "${_m__link}" in
+                /*) _m__done=""; _m__rest="${_m__link#/}${_m__rest:+/${_m__rest}}" ;;
+                 *) _m__rest="${_m__link}${_m__rest:+/${_m__rest}}" ;;
+            esac
+            continue
+        fi
+        _m__done="${_m__done}/${_m__part}"
+    done
+    case "${_m__done}" in
+        /nix|/nix/*) _m__done="${_m__nix}${_m__done#/nix}" ;;
+    esac
+    exec "${_m__done}" "${@}"
+}
+
+case "${0##*/}" in
+    bwrap)
+        [ -n "${FAKE_BWRAP_LOG}" ] && printf "%s\n" "${*}" >> "${FAKE_BWRAP_LOG}"
+        if [ -n "${FAKE_BWRAP_BROKEN}" ]; then
+            printf "%s\n" "bwrap: setting up uid map: Permission denied" >&2
+            exit 1
+        fi
+        nix=""
+        while [ "${#}" -gt "0" ]; do
+            case "${1}" in
+                --bind|--dev-bind|--ro-bind) [ X"${3}" = X"/nix" ] && nix="${2}"; shift 3 ;;
+                --die-with-parent) shift ;;
+                --) shift; break ;;
+                *) break ;;
+            esac
+        done
+        _mounted "${nix}" "${@}" ;;
+    proot)
+        [ -n "${FAKE_PROOT_LOG}" ] && printf "%s\n" "PROOT_TMP_DIR=${PROOT_TMP_DIR}" >> "${FAKE_PROOT_LOG}"
+        nix=""
+        while [ "${#}" -gt "0" ]; do
+            case "${1}" in
+                -r|-w) shift 2 ;;
+                -b) case "${2}" in *:/nix) nix="${2%:/nix}" ;; esac; shift 2 ;;
+                *) break ;;
+            esac
+        done
+        _mounted "${nix}" "${@}" ;;
+esac
+
+D="${NP_LOCATION:?}/.nix-portable"
+DB="${D}/nix/var/nix/db/fake"
+
+_register() {
+    #$1 => a store path, then the store paths it refers to
+    _r__path="${1}"; shift
+    mkdir -p "${DB}" && printf "%s\n" "${@}" | awk 'NF' > "${DB}/${_r__path#/nix/store/}"
+}
+
+if [ ! -x "${D}/bin/bwrap" ]; then
+    mkdir -p "${D}/bin" "${D}/emptyroot" "${D}${OWN}/bin" "${D}/nix/var/nix/gcroots/auto" || exit 1
+    cp "${0}" "${D}/bin/bwrap" && cp "${0}" "${D}/bin/proot" && chmod 755 "${D}/bin/bwrap" "${D}/bin/proot" || exit 1
+    chmod 555 "${D}${OWN}/bin" "${D}${OWN}" || exit 1
+    if [ -n "${FAKE_NP_INSTALL_GIT}" ]; then
+        mkdir -p "${D}${GIT}/bin" && : > "${D}${GIT}/bin/git" && chmod 555 "${D}${GIT}/bin" "${D}${GIT}" && _register "${GIT}" || exit 1
+    fi
+fi
+[ -n "${FAKE_NP_LOG}" ] && printf "%s\n" "${*} HOME=${HOME} XDG_CACHE_HOME=${XDG_CACHE_HOME} TMPDIR=${TMPDIR} PROOT_TMP_DIR=${PROOT_TMP_DIR} NIX_CONFIG=$(printf '%s' "${NIX_CONFIG}" | tr '\n' ';') NIX_USER_CONF_FILES=${NIX_USER_CONF_FILES} NP_RUNTIME=${NP_RUNTIME} NIX_REMOTE=${NIX_REMOTE} NIX_STORE_DIR=${NIX_STORE_DIR} NIX_STATE_DIR=${NIX_STATE_DIR} NP_CONF_STORE=${NP_CONF_STORE} NP_DEBUG=${NP_DEBUG} NP_RUN=${NP_RUN} BASH_ENV=${BASH_ENV}" >> "${FAKE_NP_LOG}"
+
+_path() {
+    #$1 => attribute, $2 => output. Prints its store path
+    _p__suffix=""; [ X"${2}" = X"out" ] || _p__suffix="-${2}"
+    printf "/nix/store/%s-%s-1.0%s\n" "$(printf "%s" "${1}${_p__suffix}" | cksum | awk '{printf("%032d", $1)}')" "${1}" "${_p__suffix}"
+}
+
+_script() {
+    #$1 => a file, $2 => the program it is
+    printf '%s\n' '#!/bin/sh' "printf \"%s\\n\" \"${2} ran in \${FAKE_IN_NAMESPACE:-no namespace}, HOME=\${HOME}\"" \
+        'for a in "$@"; do printf "%s\n" "${a}"; done' > "${1}" && chmod 555 "${1}"
+}
+
+_place() {
+#$1 => a store path, then its programs. A path already in the store is left
+#as it is, and what is placed is left without write permission, directories
+#included, as nix leaves it, and registered. A program written name@lib is
+#bin/name linked to $out/lib/name/name with an absolute link, and one written
+#name@binlink is a bin directory that is itself an absolute link to another
+#store path: both are how nixpkgs often does it
+    _pl__path="${1}"; shift
+    if [ ! -d "${D}${LIBC}" ]; then
+        mkdir -p "${D}${LIBC}/lib" && printf "%s\n" "a libc every package here refers to" > "${D}${LIBC}/lib/libc.so" && \
+            chmod 555 "${D}${LIBC}/lib" "${D}${LIBC}" && _register "${LIBC}" || exit 1
+    fi
+    [ -d "${D}${_pl__path}" ] && return 0
+    mkdir -p "${D}${_pl__path}" || exit 1
+    _pl__refs="${LIBC}"
+    for _pl__program in "${@}"; do
+        case "${_pl__program}" in
+            *@lib)
+                _pl__name="${_pl__program%@lib}"
+                mkdir -p "${D}${_pl__path}/bin" "${D}${_pl__path}/lib/${_pl__name}" || exit 1
+                _script "${D}${_pl__path}/lib/${_pl__name}/${_pl__name}" "${_pl__name}" || exit 1
+                ln -s "${_pl__path}/lib/${_pl__name}/${_pl__name}" "${D}${_pl__path}/bin/${_pl__name}" || exit 1
+                chmod 555 "${D}${_pl__path}/lib/${_pl__name}" "${D}${_pl__path}/lib" ;;
+            *@binlink)
+                _pl__name="${_pl__program%@binlink}"
+                mkdir -p "${D}${_pl__path}-unwrapped/bin" || exit 1
+                _script "${D}${_pl__path}-unwrapped/bin/${_pl__name}" "${_pl__name}" || exit 1
+                chmod 555 "${D}${_pl__path}-unwrapped/bin" "${D}${_pl__path}-unwrapped"
+                _register "${_pl__path}-unwrapped" "${LIBC}" || exit 1
+                _pl__refs="${_pl__refs} ${_pl__path}-unwrapped"
+                ln -s "${_pl__path}-unwrapped/bin" "${D}${_pl__path}/bin" || exit 1 ;;
+            *)
+                mkdir -p "${D}${_pl__path}/bin" || exit 1
+                _script "${D}${_pl__path}/bin/${_pl__program}" "${_pl__program}" || exit 1 ;;
+        esac
+    done
+    if [ -d "${D}${_pl__path}/bin" ] && [ ! -L "${D}${_pl__path}/bin" ]; then
+        chmod 555 "${D}${_pl__path}/bin"
+    fi
+    chmod 555 "${D}${_pl__path}"
+    _register "${_pl__path}" ${_pl__refs} || exit 1
+}
+
+_root() {
+    #$1 => a link, $2 => the path it roots. nix also keeps a link to the link
+    #in gcroots/auto, wherever the link is
+    mkdir -p "${1%/*}" && ln -sfn "${2}" "${1}" && \
+        ln -sfn "${1}" "${D}/nix/var/nix/gcroots/auto/$(printf "%s" "${1}" | cksum | awk '{print $1}')"
+}
+
+_closure() {
+    #the store paths given on stdin that are registered, and every registered
+    #path they refer to, over and over
+    {
+        awk 'NF {print "root", $0}'
+        for _c__f in "${DB}"/*; do
+            [ -f "${_c__f}" ] || continue
+            printf "valid /nix/store/%s\n" "${_c__f##*/}"
+            awk -v p="/nix/store/${_c__f##*/}" 'NF {print "ref", p, $0}' "${_c__f}"
+        done
+    } | awk '
+        $1 == "valid" { v[$2] = 1 } $1 == "root" { r[++n] = $2 } $1 == "ref" { c[$2]++; e[$2, c[$2]] = $3 }
+        END {
+            for (i = 1; i <= n; i++) if ((r[i] in v) && !(r[i] in seen)) { seen[r[i]] = 1; q[++t] = r[i] }
+            h = 1
+            while (h <= t) { p = q[h++]; print p; for (j = 1; j <= c[p]; j++) { d = e[p, j]; if ((d in v) && !(d in seen)) { seen[d] = 1; q[++t] = d } } }
+        }'
+}
+
+_live() {
+    #what the roots reach
+    find "${D}/nix/var/nix/gcroots" -type l 2>/dev/null | while read -r _l__link; do
+        _l__target="$(readlink "${_l__link}")"
+        case "${_l__target}" in
+            /nix/store/*) ;;
+            *) [ -L "${_l__target}" ] || continue; _l__target="$(readlink "${_l__target}")" ;;
+        esac
+        case "${_l__target}" in
+            /nix/store/?*) _l__target="${_l__target#/nix/store/}"; printf "/nix/store/%s\n" "${_l__target%%/*}" ;;
+        esac
+    done | _closure
+}
+
+_unaskable() {
+    if [ -n "${FAKE_NIX_QUERY_FAIL}" ]; then
+        printf "%s\n" "error: opening lock file '/nix/var/nix/db/big-lock': Permission denied" >&2
+        exit 1
+    fi
+}
+
+[ X"${1}" = X"nix" ] && shift
+case "${1}" in
+    --version) printf "%s\n" "nix (Nix) 2.20.6" ;;
+    eval)
+        shift; ro=""; tree=""; attr=""
+        while [ "${#}" -gt "0" ]; do
+            case "${1}" in
+                --read-only) ro="1" ;;
+                -f) tree="${2}"; shift ;;
+                --arg|--argstr|--option) shift 2 ;;
+                --apply) shift ;;
+                --max-jobs) shift ;;
+                -*) ;;
+                *) attr="${1}" ;;
+            esac
+            shift
+        done
+        outputs="$(awk -F'\t' -v a="${attr}" '$1 == a {print $2}' "${tree}/fake-packages.tsv" 2>/dev/null)"
+        [ -z "${outputs}" ] && { printf "%s\n" "error: attribute '${attr}' missing" >&2; exit 1; }
+        [ -n "${ro}" ] || : > "${D}$(_path "${attr}" out).drv"
+        mkdir -p "${D}/cache"
+        for output in ${outputs}; do
+            path="$(_path "${attr}" "${output}")"
+            case " ${FAKE_NIX_UNCACHED} " in
+                *" ${attr} "*) ;;
+                *) awk -F'\t' -v a="${attr}" -v o="${output}" '$1 == a && $2 == o {print $3}' \
+                       "${tree}/fake-packages.tsv" > "${D}/cache/${path#/nix/store/}" ;;
+            esac
+            printf "%s\n" "${path}"
+        done
+        ;;
+    build)
+        shift; link=""; tree=""; attr=""; paths=""
+        while [ "${#}" -gt "0" ]; do
+            case "${1}" in
+                --out-link) link="${2}"; shift ;;
+                -f) tree="${2}"; shift ;;
+                --arg|--argstr|--option) shift 2 ;;
+                --max-jobs) shift ;;
+                /nix/store/*) paths="${paths} ${1}" ;;
+                -*) ;;
+                *) attr="${1}" ;;
+            esac
+            shift
+        done
+        if [ -n "${tree}" ]; then
+            : > "${D}$(_path "${attr}" out).drv"
+            for output in $(awk -F'\t' -v a="${attr}" '$1 == a {print $2}' "${tree}/fake-packages.tsv"); do
+                path="$(_path "${attr}" "${output}")"
+                _place "${path}" $(awk -F'\t' -v a="${attr}" -v o="${output}" '$1 == a && $2 == o {print $3}' "${tree}/fake-packages.tsv")
+                if [ X"${output}" = X"out" ]; then _root "${link}" "${path}"; else _root "${link}-${output}" "${path}"; fi
+            done
+            exit 0
+        fi
+        for path in ${paths}; do
+            if [ -n "${FAKE_CACHE_DOWN}" ]; then
+                printf "%s\n" "warning: unable to download 'https://cache.nixos.org/nix-cache-info': Couldn't resolve host name (6)" \
+                    "error: path '${path}' is required, but there is no substituter that can build it" >&2
+                exit 1
+            fi
+            if [ ! -f "${D}/cache/${path#/nix/store/}" ]; then
+                printf "%s\n" "error: path '${path}' is required, but there is no substituter that can build it" >&2
+                exit 1
+            fi
+        done
+        i="0"
+        for path in ${paths}; do
+            _place "${path}" $(cat "${D}/cache/${path#/nix/store/}")
+            if [ "${i}" -eq "0" ]; then _root "${link}" "${path}"; else _root "${link}-${i}" "${path}"; fi
+            i="$((i + 1))"
+        done
+        ;;
+    path-info)
+        shift; store=""; paths=""; all=""; sized=""; links=""
+        while [ "${#}" -gt "0" ]; do
+            case "${1}" in
+                --store) store="${2}"; shift ;;
+                --all) all="1" ;;
+                --size|-s) sized="1" ;;
+                --recursive|-r) ;;
+                /nix/store/*) paths="${paths} ${1}" ;;
+                /*) links="${links} ${1}" ;;
+            esac
+            shift
+        done
+        if [ -n "${sized}" ]; then
+            _unaskable
+            for link in ${links}; do
+                readlink "${link}" || { printf "%s\n" "error: path '${link}' is not in the Nix store" >&2; exit 1; }
+            done | _closure | while read -r path; do
+                printf "%s\t%s\n" "${path}" "$(find "${D}${path}" -type f -exec cat {} + 2>/dev/null | wc -c | awk '{print $1}')"
+            done
+            exit 0
+        fi
+        if [ -n "${all}" ]; then
+            _unaskable
+            for f in "${DB}"/*; do [ -f "${f}" ] && printf "/nix/store/%s\n" "${f##*/}"; done
+            exit 0
+        fi
+        [ -n "${store}" ] || exit 1
+        if [ -n "${FAKE_CACHE_DOWN}" ]; then
+            printf "%s\n" "error: unable to download '${store}/nix-cache-info': Couldn't resolve host name (6)" >&2
+            exit 1
+        fi
+        for path in ${paths}; do
+            [ -f "${D}/cache/${path#/nix/store/}" ] || { printf "%s\n" "error: path '${path}' is not valid" >&2; exit 1; }
+            printf "%s\n" "${path}"
+        done
+        ;;
+    nix-store)
+        shift
+        case "${1}" in
+            --query)
+                _unaskable
+                shift; [ X"${1}" = X"--requisites" ] && shift
+                for link in "${@}"; do
+                    readlink "${link}" || { printf "%s\n" "error: path '${link}' is not in the Nix store" >&2; exit 1; }
+                done | _closure ;;
+            --gc)
+                _unaskable
+                printf "%s\n" "finding garbage collector roots..." "determining live/dead paths..." >&2
+                live="$(_live)"
+                for entry in "${D}"/nix/store/*; do
+                    [ -e "${entry}" ] || continue
+                    printf "%s\n" "${live}" | grep -Fx "/nix/store/${entry##*/}" >/dev/null || printf "/nix/store/%s\n" "${entry##*/}"
+                done ;;
+            --delete)
+                shift
+                live="$(_live)"
+                for path in "${@}"; do
+                    alive=""
+                    printf "%s\n" "${live}" | grep -Fx "${path}" >/dev/null && alive="1"
+                    #a registered path that refers to it and is not being
+                    #deleted with it keeps it: nix will not break a reference
+                    for f in "${DB}"/*; do
+                        [ -f "${f}" ] || continue
+                        case " ${*} " in *" /nix/store/${f##*/} "*) continue ;; esac
+                        grep -Fx "${path}" "${f}" >/dev/null && alive="1"
+                    done
+                    if [ -n "${alive}" ]; then
+                        printf "%s\n" "error: Cannot delete path '${path}' since it is still alive. To find out why, use: nix-store --query --roots" >&2
+                        exit 1
+                    fi
+                done
+                for path in "${@}"; do
+                    chmod -R u+w "${D}${path}" 2>/dev/null; rm -rf "${D}${path}" "${DB}/${path#/nix/store/}"
+                    printf "%s\n" "deleting '${path}'" >&2
+                done
+                printf "%s\n" "${#} store paths deleted, 0.00 MiB freed" ;;
+            *) exit 1 ;;
+        esac
+        ;;
+    *) printf "%s\n" "fake nix-portable: ${*}?" >&2; exit 1 ;;
+esac

@@ -1,0 +1,554 @@
+#!/bin/sh
+#a stand-in for the docker CLI and the daemon behind it, for the cmdfound
+#tests of the docker channel. It is not a channel - it is not executable - and
+#a test runs it through a docker of its own that execs "sh fake-docker". It
+#answers the calls the channel and its launchers make, and fails loudly on
+#anything else, so a call the channel was not meant to make shows:
+#
+#  context inspect --format '{{.Endpoints.docker.Host}}'   DOCKER_HOST, or the usual socket
+#  info --format '{{json .SecurityOptions}}'
+#  image inspect --format '{{.Id}} {{.Size}} {{.Parent}}' REF...   any of the three
+#  image ls|ps -a --no-trunc --filter label=K=V... [--filter status=S]... --format '{{.ID}}'
+#  ps ... --format '{{.ID}} {{.Names}}'
+#  pull REF, create, cp PATH CTR:DIR, start -a CTR, wait CTR, commit, rm, rmi, run
+#
+#Its store is FAKE_DOCKER_ROOT: images/<hex> and containers/<hex>, each a
+#directory. An image holds refs (its tags and digests, one a line), labels
+#(K=V a line), size, parent, entrypoint, env and root/, the files it has; a
+#container holds its image, labels, entrypoint, env, status and root/. Ids are a
+#counter, so they need no process to make. With FAKE_DOCKER_ROOT unset the
+#daemon cannot be reached, which is what the whole test block sees unless a
+#test sets it: no test ever reaches this machine's docker. FAKE_DOCKER_STATE
+#makes the daemon down, denied to this user, or rootless.
+#
+#A pull makes an image of FAKE_DOCKER_BASE_SIZE bytes, 7000000 unless said,
+#with no entrypoint, no variables and no command. A container keeps its
+#image's entrypoint unless create says --entrypoint, the variables create gives
+#it with -e, its name and its command; an image committed keeps the
+#entrypoint, the variables and the command, unless a --change CMD says another,
+#and its history is the container's command, as docker's is. run refuses an
+#image with an entrypoint, which would run it with the program as its argument.
+#
+#A build is start -a of a container whose command is /bin/sh SCRIPT, a file
+#copied in: its lines are read, not run. ". FILE" is read by a shell of this
+#machine, which says the value of each NAME= line of it; "rm -f PATH" and
+#"rm -rf PATH" remove in the container; "set", "status=" and "exit" lines do
+#nothing; and any other line is the install: every NAME=VERSION word on it
+#installs a program called NAME, a copy of FAKE_DOCKER_PROGRAM, in usr/bin, or
+#nothing when FAKE_DOCKER_BUILD is "empty". The build ends with
+#FAKE_DOCKER_BUILD when that is a number, which start -a answers and wait
+#prints. With FAKE_DOCKER_DETACH set, start -a answers 0 at once and leaves the
+#container running, as the CLI does when a signal of its own stops it
+#attending, and wait runs the build to its end; with FAKE_DOCKER_BUILD_WAIT, a
+#number of seconds, start -a marks the container started and waits that long
+#first, and a SIGINT or a SIGTERM then makes it answer 0 at once the same way. A commit adds FAKE_DOCKER_LAYER_SIZE
+#bytes, 800000 unless said, to the image it was built from, and is refused for a
+#container that never ran. run executes the program from the image's root with
+#only the variables -e names - by name from this process's own environment, or
+#as NAME=VALUE - and the image's PATH, in the -w directory; /bin/sh, which the
+#channel asks whether a program is there, looks in the image alone. -t without
+#a terminal fails as docker does, and rmi -f is refused outright: the channel
+#never uses it.
+#
+#FAKE_DOCKER_LOG, when set, gets a line for each call: the HOME, DOCKER_CONFIG
+#and DOCKER_HOST it ran with, then each argument in <>, a newline in one shown
+#as \n. A build adds "buildenv NAME=VALUE" for each variable a file it read
+#gives, and, at its install line, "build install net.env=<present or gone>
+#ca=<the CA file's content, or ->", those of /etc/cmdfound. Like the CLI, it
+#writes under DOCKER_CONFIG, or HOME/.docker
+
+NL="
+"
+ROOT="${FAKE_DOCKER_ROOT}"
+ENDPOINT="${DOCKER_HOST:-unix:///var/run/docker.sock}"
+
+_log() {
+    [ -n "${FAKE_DOCKER_LOG}" ] || return 0
+    _l__line="HOME=${HOME-unset} DOCKER_CONFIG=${DOCKER_CONFIG-unset} DOCKER_HOST=${DOCKER_HOST-unset} |"
+    for _l__a in "${@}"; do
+        while :; do
+            case "${_l__a}" in
+                *"${NL}"*) _l__a="${_l__a%%"${NL}"*}\\n${_l__a#*"${NL}"}" ;;
+                *) break ;;
+            esac
+        done
+        _l__line="${_l__line} <${_l__a}>"
+    done
+    printf "%s\n" "${_l__line}" >> "${FAKE_DOCKER_LOG}"
+}
+
+_die() {
+    #$1 => status, then the message
+    _d__rc="${1}"; shift
+    printf "%s\n" "${*}" >&2
+    exit "${_d__rc}"
+}
+
+_daemon() {
+    [ -n "${ROOT}" ] && [ X"${FAKE_DOCKER_STATE}" != X"down" ] || \
+        _die 1 "failed to connect to the docker API at ${ENDPOINT}; check if the path is correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory"
+    [ X"${FAKE_DOCKER_STATE}" != X"denied" ] || \
+        _die 1 "permission denied while trying to connect to the docker API at ${ENDPOINT}"
+    mkdir -p "${ROOT}/images" "${ROOT}/containers"
+}
+
+_new_id() {
+    #sets id to a fresh 64 digit id
+    _ni__n="0"
+    [ -f "${ROOT}/counter" ] && read -r _ni__n < "${ROOT}/counter"
+    _ni__n="$((_ni__n + 1))"
+    printf "%s\n" "${_ni__n}" > "${ROOT}/counter"
+    id="$(printf "%064d" "${_ni__n}")"
+}
+
+_find_image() {
+    #$1 => an id or a ref. Sets img to its directory, or to nothing
+    img=""
+    case "${1}" in
+        sha256:*) [ -d "${ROOT}/images/${1#sha256:}" ] && img="${ROOT}/images/${1#sha256:}"
+                  return 0 ;;
+    esac
+    for _fi__d in "${ROOT}"/images/*; do
+        [ -f "${_fi__d}/refs" ] || continue
+        while IFS= read -r _fi__r; do
+            [ X"${_fi__r}" = X"${1}" ] && { img="${_fi__d}"; return 0; }
+        done < "${_fi__d}/refs"
+    done
+    return 0
+}
+
+_find_container() {
+    ctr=""
+    [ -d "${ROOT}/containers/${1}" ] && { ctr="${ROOT}/containers/${1}"; return 0; }
+    for _fc__d in "${ROOT}"/containers/*; do
+        [ -f "${_fc__d}/name" ] || continue
+        [ X"$(cat "${_fc__d}/name")" = X"${1}" ] && { ctr="${_fc__d}"; return 0; }
+    done
+    return 0
+}
+
+_labelled() {
+    #$1 => a labels file, $2 => the wanted K=V lines. Answers 0 when it has all
+    _lb__rest="${2}"
+    while [ -n "${_lb__rest}" ]; do
+        _lb__want="${_lb__rest%%"${NL}"*}"; _lb__rest="${_lb__rest#*"${NL}"}"
+        [ -n "${_lb__want}" ] || continue
+        grep -Fx -- "${_lb__want}" "${1}" >/dev/null 2>&1 || return 1
+    done
+    return 0
+}
+
+_value_of() {
+    #$1 => NAME. Sets value and answers 0 when NAME is set here
+    case "${1}" in
+        ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) return 1 ;;
+    esac
+    eval "_vo__set=\"\${${1}+x}\" value=\"\${${1}}\""
+    [ -n "${_vo__set}" ]
+}
+
+_build() {
+    #runs the build of the container ${ctr}, as its own command: reads the
+    #script, and says how it ended in the container's exitcode
+    { read -r shell; read -r script; } < "${ctr}/cmd"
+    [ X"${shell}" = X"/bin/sh" ] && [ -f "${ctr}/root${script}" ] || _die 2 "fake-docker: start of ${shell} ${script}"
+    while IFS= read -r line; do
+        case "${line}" in
+            ''|"set -a"|"set +a"|"status=\$?"|"exit \${status}") ;;
+            ". "*)
+                file="${ctr}/root${line#. }"
+                [ -f "${file}" ] || _die 2 "fake-docker: ${line}: no such file"
+                [ -z "${FAKE_DOCKER_LOG}" ] && continue
+                while IFS= read -r assign; do
+                    case "${assign}" in
+                        [A-Za-z_]*=*) name="${assign%%=*}" ;;
+                        *) continue ;;
+                    esac
+                    case "${name}" in *[!A-Za-z0-9_]*) continue ;; esac
+                    printf "buildenv %s=%s\n" "${name}" "$(sh -c '. "${1}" && eval "printf \"%s\" \"\${${2}}\""' sh "${file}" "${name}")" >> "${FAKE_DOCKER_LOG}"
+                done < "${file}" ;;
+            "rm -f /"*)  rm -f "${ctr}/root${line#rm -f }" ;;
+            "rm -rf /"*) rm -rf "${ctr}/root${line#rm -rf }" ;;
+            *)
+                if [ -n "${FAKE_DOCKER_LOG}" ]; then
+                    present="gone"; [ -e "${ctr}/root/etc/cmdfound/net.env" ] && present="present"
+                    printf "build install net.env=%s ca=%s\n" "${present}" \
+                        "$(cat "${ctr}/root/etc/cmdfound/ca.pem" 2>/dev/null || printf -)" >> "${FAKE_DOCKER_LOG}"
+                fi
+                for word in ${line}; do
+                    case "${word}" in
+                        -*|*=*=*) continue ;;
+                        [A-Za-z0-9]*=?*) ;;
+                        *) continue ;;
+                    esac
+                    pkg="${word%%=*}"
+                    [ X"${FAKE_DOCKER_BUILD}" = X"empty" ] && continue
+                    cp "${FAKE_DOCKER_PROGRAM}" "${ctr}/root/usr/bin/${pkg}" && chmod 755 "${ctr}/root/usr/bin/${pkg}"
+                    printf "%s\n" "(1/1) Installing ${pkg}"
+                done ;;
+        esac
+    done < "${ctr}/root${script}"
+    code="0"
+    case "${FAKE_DOCKER_BUILD}" in
+        ''|*[!0-9]*) ;;
+        *) code="${FAKE_DOCKER_BUILD}" ;;
+    esac
+    printf "%s\n" "${code}" > "${ctr}/exitcode"
+    printf "%s\n" "exited" > "${ctr}/status"
+}
+
+[ -z "${FAKE_DOCKER_LOG}" ] || _log "${@}"
+_cfg="${DOCKER_CONFIG:-${HOME}/.docker}"
+[ -d "${_cfg}" ] || mkdir -p "${_cfg}" 2>/dev/null
+
+case "${1} ${2}" in
+    "context inspect")
+        [ X"${3} ${4}" = X"--format {{.Endpoints.docker.Host}}" ] || _die 2 "fake-docker: context inspect ${3} ${4}"
+        printf "%s\n" "${ENDPOINT}"
+        exit 0 ;;
+
+    "info --format")
+        [ X"${3}" = X"{{json .SecurityOptions}}" ] || _die 2 "fake-docker: info --format ${3}"
+        _daemon
+        if [ X"${FAKE_DOCKER_STATE}" = X"rootless" ]; then
+            printf "%s\n" '["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]'
+        else
+            printf "%s\n" '["name=seccomp,profile=builtin","name=cgroupns"]'
+        fi
+        exit 0 ;;
+
+    "image inspect")
+        [ X"${3}" = X"--format" ] || _die 2 "fake-docker: image inspect without --format"
+        format="${4}"; shift 4
+        case "${format}" in
+            *"{{"*)
+                _rest="${format}"
+                while :; do
+                    case "${_rest}" in
+                        *"{{"*) _t="${_rest#*"{{"}"; _t="${_t%%"}}"*}"; _rest="${_rest#*"}}"}"
+                                case "${_t}" in .Id|.Size|.Parent) ;; *) _die 2 "fake-docker: format {{${_t}}}" ;; esac ;;
+                        *) break ;;
+                    esac
+                done ;;
+            *) _die 2 "fake-docker: format ${format}" ;;
+        esac
+        _daemon
+        rc="0"
+        for ref in "${@}"; do
+            _find_image "${ref}"
+            if [ -z "${img}" ]; then
+                printf "%s\n" "Error response from daemon: No such image: ${ref}" >&2
+                rc="1"; continue
+            fi
+            size="$(cat "${img}/size")"; parent="$(cat "${img}/parent" 2>/dev/null)"
+            out="${format}"
+            while :; do
+                case "${out}" in
+                    *"{{.Id}}"*)     out="${out%%"{{.Id}}"*}sha256:${img##*/}${out#*"{{.Id}}"}" ;;
+                    *"{{.Size}}"*)   out="${out%%"{{.Size}}"*}${size}${out#*"{{.Size}}"}" ;;
+                    *"{{.Parent}}"*) out="${out%%"{{.Parent}}"*}${parent}${out#*"{{.Parent}}"}" ;;
+                    *) break ;;
+                esac
+            done
+            printf "%s\n" "${out}"
+        done
+        exit "${rc}" ;;
+
+    "image ls"|"ps "*)
+        [ X"${1}" = X"ps" ] && { kind="containers"; shift 1; } || { kind="images"; shift 2; }
+        labels=""; statuses=""; format=""
+        while [ "${#}" -gt "0" ]; do
+            case "${1}" in
+                -a|--all|--no-trunc) ;;
+                --filter) shift
+                          case "${1}" in
+                              label=*)  labels="${labels}${1#label=}${NL}" ;;
+                              status=*) statuses="${statuses} ${1#status=} " ;;
+                              *) _die 2 "fake-docker: filter ${1}" ;;
+                          esac ;;
+                --format) shift; format="${1}" ;;
+                *) _die 2 "fake-docker: ${kind} ${1}" ;;
+            esac
+            shift
+        done
+        case "${kind}:${format}" in
+            *:"{{.ID}}"|"containers:{{.ID}} {{.Names}}") ;;
+            *) _die 2 "fake-docker: ${kind} listed without --format {{.ID}}" ;;
+        esac
+        _daemon
+        for d in "${ROOT}/${kind}"/*; do
+            [ -d "${d}" ] || continue
+            _labelled "${d}/labels" "${labels}" || continue
+            if [ -n "${statuses}" ]; then
+                case "${statuses}" in *" $(cat "${d}/status") "*) ;; *) continue ;; esac
+            fi
+            if [ X"${kind}" = X"images" ]; then
+                printf "sha256:%s\n" "${d##*/}"
+            elif [ X"${format}" = X"{{.ID}}" ]; then
+                printf "%s\n" "${d##*/}"
+            else
+                printf "%s %s\n" "${d##*/}" "$(cat "${d}/name" 2>/dev/null)"
+            fi
+        done
+        exit 0 ;;
+
+    "pull "*)
+        shift
+        [ X"${1}" = X"-q" ] || [ X"${1}" = X"--quiet" ] && shift
+        [ "${#}" -eq "1" ] || _die 2 "fake-docker: pull ${*}"
+        _daemon
+        [ -z "${FAKE_DOCKER_PULL}" ] || _die 1 "Error response from daemon: ${FAKE_DOCKER_PULL}"
+        _find_image "${1}"
+        [ -z "${img}" ] || { printf "%s\n" "Status: Image is up to date for ${1}"; exit 0; }
+        _new_id
+        img="${ROOT}/images/${id}"
+        mkdir -p "${img}/root/etc" "${img}/root/usr/bin" && : > "${img}/labels" && : > "${img}/parent"
+        printf "%s\n" "${1}" > "${img}/refs"
+        printf "%s\n" "${FAKE_DOCKER_BASE_SIZE:-7000000}" > "${img}/size"
+        printf "%s\n" "${1%%@*}: Pulling from library" "Status: Downloaded newer image for ${1}"
+        exit 0 ;;
+
+    "create "*)
+        shift
+        name=""; labels=""; env=""; entrypoint=""; entrypoint_set=""
+        while [ "${#}" -gt "0" ]; do
+            case "${1}" in
+                --name) shift; name="${1}" ;;
+                --label) shift; labels="${labels}${1}${NL}" ;;
+                --network=host|--pull=never|--user=0:0) ;;
+                -e) shift
+                    case "${1}" in
+                        *=*) env="${env}${1}${NL}" ;;
+                        *) _value_of "${1}" && env="${env}${1}=${value}${NL}" ;;
+                    esac ;;
+                --entrypoint) shift; entrypoint="${1}"; entrypoint_set="1" ;;
+                -*) _die 125 "unknown flag: ${1}" ;;
+                *) break ;;
+            esac
+            shift
+        done
+        _daemon
+        _find_image "${1}"
+        [ -n "${img}" ] || _die 125 "Error response from daemon: No such image: ${1}"
+        shift
+        if [ -n "${name}" ]; then
+            _find_container "${name}"
+            [ -z "${ctr}" ] || _die 125 "Error response from daemon: Conflict. The container name \"/${name}\" is already in use"
+        fi
+        [ -n "${entrypoint_set}" ] || entrypoint="$(cat "${img}/entrypoint" 2>/dev/null)"
+        _new_id
+        ctr="${ROOT}/containers/${id}"
+        mkdir -p "${ctr}" && cp -R "${img}/root" "${ctr}/root" || exit 1
+        printf "%s" "${name}" > "${ctr}/name"
+        { cat "${img}/labels"; printf "%s" "${labels}"; } > "${ctr}/labels"
+        { cat "${img}/env" 2>/dev/null; printf "%s" "${env}"; } > "${ctr}/env"
+        printf "%s" "${entrypoint}" > "${ctr}/entrypoint"
+        if [ "${#}" -gt "0" ]; then
+            printf "%s\n" "${@}" > "${ctr}/cmd"
+        else
+            cp "${img}/cmd" "${ctr}/cmd" 2>/dev/null || : > "${ctr}/cmd"
+        fi
+        printf "sha256:%s\n" "${img##*/}" > "${ctr}/image"
+        printf "%s\n" "created" > "${ctr}/status"
+        printf "%s\n" "${id}"
+        exit 0 ;;
+
+    "cp "*)
+        _daemon
+        _find_container "${3%%:*}"
+        [ -n "${ctr}" ] || _die 1 "Error response from daemon: No such container: ${3%%:*}"
+        dest="${ctr}/root${3#*:}"
+        [ -d "${dest}" ] || _die 1 "Error response from daemon: Could not find the file ${3#*:} in container"
+        cp -R "${2}" "${dest}/" || exit 1
+        exit 0 ;;
+
+    "start -a")
+        _daemon
+        _find_container "${3}"
+        [ -n "${ctr}" ] || _die 1 "Error response from daemon: No such container: ${3}"
+        [ X"$(cat "${ctr}/status")" = X"created" ] || _die 1 "fake-docker: container ${3} is not new"
+        printf "%s\n" "running" > "${ctr}/status"
+        #the CLI stops attending and answers 0, the container still running
+        [ -z "${FAKE_DOCKER_DETACH}" ] || exit 0
+        if [ -n "${FAKE_DOCKER_BUILD_WAIT}" ]; then
+            sleep "${FAKE_DOCKER_BUILD_WAIT}" & waited="${!}"
+            trap 'kill "${waited}" 2>/dev/null; exit 0' INT TERM
+            : > "${ctr}/started"
+            wait "${waited}"
+            trap - INT TERM
+        fi
+        _build
+        exit "$(cat "${ctr}/exitcode")" ;;
+
+    "wait "*)
+        _daemon
+        _find_container "${2}"
+        [ -n "${ctr}" ] || _die 1 "Error response from daemon: No such container: ${2}"
+        [ X"$(cat "${ctr}/status")" = X"running" ] && _build >&2
+        [ X"$(cat "${ctr}/status")" = X"exited" ] || _die 1 "fake-docker: wait for a container that never ran"
+        cat "${ctr}/exitcode"
+        exit 0 ;;
+
+    "commit "*)
+        shift
+        changes=""
+        while [ "${#}" -gt "0" ]; do
+            case "${1}" in
+                --change) shift; changes="${changes}${1}${NL}" ;;
+                -*) _die 1 "unknown flag: ${1}" ;;
+                *) break ;;
+            esac
+            shift
+        done
+        _daemon
+        _find_container "${1}"
+        [ -n "${ctr}" ] || _die 1 "Error response from daemon: No such container: ${1}"
+        [ X"$(cat "${ctr}/status")" = X"created" ] && _die 1 "fake-docker: commit of a container that did not run"
+        _find_image "$(cat "${ctr}/image")"
+        from="${img}"
+        _new_id
+        img="${ROOT}/images/${id}"
+        mkdir -p "${img}" && cp -R "${ctr}/root" "${img}/root" || exit 1
+        cp "${ctr}/labels" "${img}/labels"
+        printf "sha256:%s\n" "${from##*/}" > "${img}/parent"
+        printf "%s\n" "$(( $(cat "${from}/size") + ${FAKE_DOCKER_LAYER_SIZE:-800000} ))" > "${img}/size"
+        printf "%s" "${changes}" > "${img}/changes"
+        cp "${ctr}/entrypoint" "${img}/entrypoint"
+        cp "${ctr}/env" "${img}/env"
+        cp "${ctr}/cmd" "${img}/cmd"
+        tr '\n' ' ' < "${ctr}/cmd" > "${img}/history"
+        _rest="${changes}"
+        while [ -n "${_rest}" ]; do
+            _c="${_rest%%"${NL}"*}"; _rest="${_rest#*"${NL}"}"
+            case "${_c}" in
+                "CMD "*) printf "%s\n" "${_c#CMD }" > "${img}/cmd" ;;
+            esac
+        done
+        : > "${img}/refs"
+        if [ -n "${2}" ]; then
+            #a tag names one image: the one it named before loses it
+            for d in "${ROOT}"/images/*; do
+                [ -f "${d}/refs" ] && grep -Fx -- "${2}" "${d}/refs" >/dev/null || continue
+                grep -Fxv -- "${2}" "${d}/refs" > "${d}/refs.new"; mv "${d}/refs.new" "${d}/refs"
+            done
+            printf "%s\n" "${2}" > "${img}/refs"
+        fi
+        printf "sha256:%s\n" "${id}"
+        exit 0 ;;
+
+    "rm "*)
+        shift
+        force=""
+        [ X"${1}" = X"-f" ] && { force="1"; shift; }
+        _daemon
+        rc="0"
+        for c in "${@}"; do
+            _find_container "${c}"
+            if [ -z "${ctr}" ]; then
+                printf "%s\n" "Error response from daemon: No such container: ${c}" >&2; rc="1"; continue
+            fi
+            if [ -z "${force}" ] && [ X"$(cat "${ctr}/status")" = X"running" ]; then
+                printf "%s\n" "Error response from daemon: cannot remove container ${c}: container is running: stop the container before removing or force remove" >&2; rc="1"; continue
+            fi
+            rm -rf "${ctr}"
+            printf "%s\n" "${c}"
+        done
+        exit "${rc}" ;;
+
+    "rmi "*)
+        shift
+        case " ${*} " in
+            *" -f "*|*" --force "*) _die 99 "fake-docker: rmi -f removes what docker would keep, and the channel never asks it" ;;
+        esac
+        _daemon
+        rc="0"
+        for ref in "${@}"; do
+            _find_image "${ref}"
+            if [ -z "${img}" ]; then
+                printf "%s\n" "Error response from daemon: No such image: ${ref}" >&2; rc="1"; continue
+            fi
+            hex="${img##*/}"
+            children=""; users=""
+            for d in "${ROOT}"/images/*; do
+                [ X"$(cat "${d}/parent" 2>/dev/null)" = X"sha256:${hex}" ] && children="1"
+            done
+            for d in "${ROOT}"/containers/*; do
+                [ X"$(cat "${d}/image" 2>/dev/null)" = X"sha256:${hex}" ] && users="${d##*/}"
+            done
+            refs="$(grep -c . "${img}/refs")"
+            case "${ref}" in
+                sha256:*)
+                    if [ -n "${users}" ]; then
+                        printf "%s\n" "Error response from daemon: conflict: unable to delete ${hex} (must be forced) - image is being used by stopped container ${users}" >&2; rc="1"; continue
+                    elif [ -n "${children}" ]; then
+                        printf "%s\n" "Error response from daemon: conflict: unable to delete ${hex} (cannot be forced) - image has dependent child images" >&2; rc="1"; continue
+                    elif [ "${refs}" -gt "1" ]; then
+                        printf "%s\n" "Error response from daemon: conflict: unable to delete ${hex} (must be forced) - image is referenced in multiple repositories" >&2; rc="1"; continue
+                    fi ;;
+                *)
+                    if [ "${refs}" -eq "1" ] && [ -n "${users}" ]; then
+                        printf "%s\n" "Error response from daemon: conflict: unable to remove repository reference \"${ref}\" (must force) - container ${users} is using its referenced image ${hex}" >&2; rc="1"; continue
+                    fi
+                    grep -Fxv -- "${ref}" "${img}/refs" > "${img}/refs.new"; mv "${img}/refs.new" "${img}/refs"
+                    printf "%s\n" "Untagged: ${ref}"
+                    { [ -s "${img}/refs" ] || [ -n "${children}" ]; } && continue ;;
+            esac
+            rm -rf "${img}"
+            printf "%s\n" "Deleted: sha256:${hex}"
+        done
+        exit "${rc}" ;;
+
+    "run "*)
+        shift
+        tty=""; workdir="/"; env=""; home=""
+        while [ "${#}" -gt "0" ]; do
+            case "${1}" in
+                --rm|-i|--init|--log-driver=none|--network=host|--pull=never) ;;
+                -t) tty="1" ;;
+                -u|--group-add|-v|-p) shift ;;
+                -w) shift; workdir="${1}" ;;
+                -e) shift
+                    case "${1}" in
+                        HOME=*|HOME) home="1" ;;
+                    esac
+                    case "${1}" in
+                        *=*) env="${env}${1}${NL}" ;;
+                        *) _value_of "${1}" && env="${env}${1}=${value}${NL}" ;;
+                    esac ;;
+                -*) _die 125 "unknown flag: ${1}" ;;
+                *) break ;;
+            esac
+            shift
+        done
+        _daemon
+        _find_image "${1}"
+        [ -n "${img}" ] || _die 125 "docker: Error response from daemon: No such image: ${1}"
+        case "${1}" in
+            sha256:*) ;;
+            *) _die 125 "fake-docker: an image run by something other than its id" ;;
+        esac
+        [ ! -s "${img}/entrypoint" ] || _die 126 "fake-docker: the image's entrypoint, $(cat "${img}/entrypoint"), would run ${2} as its argument"
+        [ -z "${tty}" ] || [ -t 0 ] || _die 1 "the input device is not a TTY"
+        shift
+        case "${1}" in
+            /bin/sh) program="/bin/sh" ;;
+            /*) program="${img}/root${1}" ;;
+            *)  program="${img}/root/usr/bin/${1}" ;;
+        esac
+        [ -x "${program}" ] || _die 127 "docker: Error response from daemon: exec: \"${1}\": executable file not found in \$PATH"
+        shift
+        cd "${workdir}" 2>/dev/null || cd /
+        [ -n "${home}" ] || env="${env}HOME=/${NL}"
+        set -- "${program}" "${@}"
+        _rest="${env}"
+        while [ -n "${_rest}" ]; do
+            _e="${_rest%%"${NL}"*}"; _rest="${_rest#*"${NL}"}"
+            set -- "${_e}" "${@}"
+        done
+        #the image's PATH: a shell looks only in the image, and a program of a
+        #package, one of the tests' scripts, finds this machine's tools too
+        path="${img}/root/usr/bin"
+        [ X"${program}" = X"/bin/sh" ] || path="${path}:/usr/bin:/bin"
+        exec env -i "PATH=${path}" "${@}" ;;
+esac
+_die 2 "fake-docker: nothing stands in for docker ${*}"

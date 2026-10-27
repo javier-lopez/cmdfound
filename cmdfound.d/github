@@ -1,0 +1,277 @@
+#!/bin/sh
+#description: cmdfound channel - a program published as a release asset on github
+#usage: github meta | github probe OWNER/REPO [VER]
+#       github locate OWNER/REPO VER
+#covers: kelp, ubi, eget, stew - installers of a github release, with no catalog of their own
+
+#CMDFOUND_CHANNEL_FILE and not $0: the resolver sources this, and $0 is its own
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+
+API="https://api.github.com/repos"
+
+_cache_file() {
+    #$1 => owner/repo, $2 => a version, empty for the latest
+    #    _cache_file jqlang/jq jq-1.7.1  =>  .../cache/jqlang_jq_jq-1.7.1.json
+    #    _cache_file jqlang/jq ""        =>  .../cache/jqlang_jq_.json
+    _util_replace_in "${1}@${2}" "/@" "_"
+    printf "%s\\n" "${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}/cache/${_util_replace_in__out}.json"
+}
+
+_fetch_release() {
+    #$1 => owner/repo, $2 => a version, empty for the latest; the release in release_file
+    #    _fetch_release jqlang/jq jq-1.7.1  =>  0, .../cache/jqlang_jq_jq-1.7.1.json
+    #    _fetch_release jqlang/nojq ""      =>  1
+    #    _fetch_release jqlang/jq ""        =>  2, offline and nothing cached, the reason in why
+    _fetch_release__repo="${1}"; _fetch_release__ver="${2}"
+    why=""
+    release_file="$(_cache_file "${_fetch_release__repo}" "${_fetch_release__ver}")"
+
+    #a tag never changes; "latest" is asked again after a day
+    if [ -s "${release_file}" ]; then
+        [ -n "${_fetch_release__ver}" ] && return 0
+        if _api_is_fresh "${release_file}"; then
+            return 0
+        fi
+    fi
+
+    if [ -n "${_fetch_release__ver}" ]; then
+        _fetch_release__latest="$(_cache_file "${_fetch_release__repo}" "")"
+        if [ -s "${_fetch_release__latest}" ] && \
+           [ X"$(_version_of < "${_fetch_release__latest}")" = X"${_fetch_release__ver}" ]; then
+            release_file="${_fetch_release__latest}"
+            return 0
+        fi
+    fi
+
+    if [ -z "${_fetch_release__ver}" ]; then
+        _fetch_release__url="${API}/${_fetch_release__repo}/releases/latest"
+    else
+        _fetch_release__url="${API}/${_fetch_release__repo}/releases/tags/${_fetch_release__ver}"
+    fi
+
+    if _api_reads_no "${CMDFOUND_GITHUB_API}"; then
+        [ -s "${release_file}" ] && return 0
+        why="CMDFOUND_GITHUB_API=off and nothing about ${_fetch_release__repo} is cached"
+        return 2
+    fi
+
+    _util_mkdir_p "${release_file%/*}"
+    _fetch_release__tmp="${release_file}.$$"
+    _api_fetcher_github_in "${_fetch_release__url}" "${_fetch_release__tmp}"
+
+    case "${_api_fetcher_github_in__out}" in
+        200)
+            if grep '"assets"' "${_fetch_release__tmp}" >/dev/null 2>&1; then
+                mv "${_fetch_release__tmp}" "${release_file}"
+                return 0
+            fi
+            why="github answered with something that is not a release" ;;
+        404)
+            rm -f "${_fetch_release__tmp}"
+            return 1 ;;
+        403|429)
+            case "$(awk -F'"' '/"message"/ {print $4; exit}' "${_fetch_release__tmp}" 2>/dev/null)" in
+                *'rate limit'*)
+                    why="the github api limit for this address is used up"
+                    _api_github_token_in || \
+                        why="${why}, exporting GITHUB_TOKEN raises it from 60 to 5000 an hour" ;;
+                *)  why="github refused the request with ${_api_fetcher_github_in__out}" ;;
+            esac ;;
+        000) why="api.github.com did not answer" ;;
+        *)   why="github answered ${_api_fetcher_github_in__out}" ;;
+    esac
+    rm -f "${_fetch_release__tmp}"
+
+    #a stale answer beats none
+    [ -s "${release_file}" ] && return 0
+    return 2
+}
+
+_platform() {
+    #this cpu, every spelling of it a release uses
+    #    _platform  =>  x86_64|x86-64|amd64|x64
+
+    #x86-64 is pkgx's
+    _util_machine_in
+    case "${_util_machine_in__cpu}" in
+        x86_64|amd64) printf "%s\\n" "x86_64|x86-64|amd64|x64" ;;
+        aarch64|arm64) printf "%s\\n" "aarch64|arm64" ;;
+        *) printf "%s\\n" "${_util_machine_in__cpu}" ;;
+    esac
+}
+
+_fields() {
+    #the release on stdin; a tag line and a line per asset, a tab apart
+    #    {"tag_name":"jq-1.7.1","assets":[...]}  =>  tag    jq-1.7.1
+    #                                                asset  jq-linux-amd64  2201344  https://...  sha256:5942...
+    _util_json 3 | awk -F'\t' '
+        $1 == "tag_name" { print "tag\t" $2; next }
+
+        #assets/<n>/<field>, and nothing deeper or beside it
+        {
+            n = split($1, p, "/")
+            if (n != 3 || p[1] != "assets") next
+            v[p[2], p[3]] = $2
+            if (p[2] + 1 > count) count = p[2] + 1
+        }
+
+        #which assets have the three fields that make one is known only once
+        #the whole release has been read
+        END {
+            for (i = 0; i < count; i++)
+                if (v[i, "name"] != "" && v[i, "size"] != "" &&
+                    v[i, "browser_download_url"] != "")
+                    printf("asset\t%s\t%s\t%s\t%s\n", v[i, "name"],
+                           v[i, "size"], v[i, "browser_download_url"],
+                           v[i, "digest"])
+        }'
+}
+
+_assets() {
+    #the release on stdin; name, size, url and sha256 of each asset this machine runs
+    #    jq-linux-amd64, jq-macos-arm64, jq-windows-amd64.exe  =>  jq-linux-amd64  2201344  https://...  5942...
+
+    #an asset that names no system is taken only when none names linux
+    _fields | awk -F'\t' -v arches="$(_platform)" '
+        $1 == "asset" && (kind = usable($2)) {
+            d = tolower($5); h = ""
+            if (substr(d, 1, 7) == "sha256:") {
+                h = substr(d, 8)
+                if (length(h) != 64 || h !~ /^[0-9a-f]+$/) h = ""
+            }
+            line = sprintf("%s\t%s\t%s\t%s", $2, $3, $4, h)
+            if (kind == 1) { print line; named = 1 } else unnamed[++n_unnamed] = line
+        }
+        END { if (!named) for (i = 1; i <= n_unnamed; i++) print unnamed[i] }
+        function usable(n,   lower, n_arches, a, i, arch) {
+            lower = tolower(n)
+            #signatures, checksums and distribution packages are not programs
+            if (lower ~ /\.(sha[0-9]*|sha[0-9]*sum|md5|asc|sig|pem|sbom|json|txt|deb|rpm|apk|pkg|msi|dmg|exe)$/) return 0
+            if (lower ~ /(darwin|apple|macos|windows|freebsd|netbsd|openbsd|android)/) return 0
+            n_arches = split(arches, a, "|"); arch = 0
+            for (i = 1; i <= n_arches; i++) if (index(lower, tolower(a[i]))) arch = 1
+            if (!arch) return 0
+            #a test is never written "lower ~ /re/ == 0": == binds tighter than
+            #~, so that matches lower against the 0 or 1 of ($0 ~ /re/), and a
+            #name with a 1 in it passes a test it was meant to fail
+            if (lower ~ /(linux|musl|gnu)/) return 1
+            if (lower ~ /(win|mac|osx|ios|solaris|illumos|sunos|aix|dragonfly|plan9|wasm|wasi)/) return 0
+            if (lower ~ /\.(tar|tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2?|appimage)$/) return 2
+            #an extension is a last dot and up to eight letters and digits, a
+            #letter among them: 7z is one, the 3 of 1.2.3 and an architecture
+            #a name ends in are not
+            if (match(lower, /\.[a-z0-9]+$/) && RLENGTH <= 9 && substr(lower, RSTART) ~ /[a-z]/) {
+                for (i = 1; i <= n_arches; i++) if (substr(lower, RSTART + 1) == tolower(a[i])) return 2
+                return 0
+            }
+            return 2
+        }'
+}
+
+_musl_before_glibc() {
+    awk -F'\t' '
+        { score = ($1 ~ /musl/) ? 0 : 1
+          if (best == "" || score < best_score) { best = $0; best_score = score } }
+        END { if (best != "") print best }'
+}
+
+_version_of() {
+    _fields | awk -F'\t' '$1 == "tag" {print $2; exit}'
+}
+
+_meta() {
+    printf "%s\\n" "aliases=gh" "kind=artifact" "confines=no" "describes=self"
+    exit 0
+}
+
+_valid() {
+    #$1 => owner/repo, $2 => a version (optional)
+    #    _valid jqlang/jq jq-1.7.1  =>  0
+    #    _valid x/../jqlang/jq ""   =>  1
+    case "${1}" in
+        */*/*|*/|/*) return 1 ;;
+        */*) ;;
+        *) return 1 ;;
+    esac
+    _api_is_program_name "${1%%/*}" && _api_is_program_name "${1#*/}" || return 1
+    [ -z "${2}" ] || _api_is_version "${2}"
+}
+
+_probe() {
+    #$1 => owner/repo, $2 => a version when one was asked for
+    repo="${1}"; ver="${2}"
+    [ -z "${repo}" ] && exit 1
+    _valid "${repo}" "${ver}" || exit 1
+
+    _fetch_release "${repo}" "${ver}"
+    case "${?}" in
+        0) ;;
+        1) exit 1 ;;
+        *) _api_answer_unreachable "${why}" ;;
+    esac
+    body="$(cat "${release_file}")"
+    asset="$(printf "%s\\n" "${body}" | _assets | _musl_before_glibc)"
+    [ -z "${asset}" ] && exit 1
+
+    version="$(printf "%s\\n" "${body}" | _version_of)"
+    [ -z "${version}" ] && exit 1
+    printf "version=%s\\n" "${version}"
+    printf "bytes=%s\\n"   "$(printf "%s\\n" "${asset}" | awk -F'\t' '{print $2}')"
+    if ! _api_reads_no "${CMDFOUND_GITHUB_DIGEST}" && \
+       [ -n "$(printf "%s\\n" "${asset}" | awk -F'\t' '{print $4}')" ]; then
+        printf "badge=%s\\n" "verified"
+    else
+        printf "badge=%s\\n" "none"
+    fi
+    exit 0
+}
+
+_locate() {
+    #$1 => owner/repo, $2 => a version
+    repo="${1}"; ver="${2}"
+    _valid "${repo}" "${ver}" || exit 1
+    _fetch_release "${repo}" "${ver}"
+    case "${?}" in
+        0) ;;
+        1) exit 1 ;;
+        *) _api_answer_unreachable "${why}" ;;
+    esac
+    body="$(cat "${release_file}")"
+    asset="$(printf "%s\\n" "${body}" | _assets | _musl_before_glibc)"
+    [ -z "${asset}" ] && exit 1
+
+    name="$(printf "%s\\n" "${asset}"   | awk -F'\t' '{print $1}')"
+    url="$(printf  "%s\\n" "${asset}"   | awk -F'\t' '{print $3}')"
+    digest="$(printf "%s\\n" "${asset}" | awk -F'\t' '{print $4}')"
+
+    printf "url=%s\\n"    "${url}"
+    printf "format=%s\\n" "$(_api_format_of "${name}")"
+    printf "bin=%s\\n"    "${repo##*/}"
+
+    if [ -n "${digest}" ] && ! _api_reads_no "${CMDFOUND_GITHUB_DIGEST}"; then
+        printf "sha256=%s\\n" "${digest}"
+        exit 0
+    fi
+
+    sums="$(printf "%s\\n" "${body}" | _fields | awk -F'\t' '
+        $1 == "asset" {
+            u = $4; l = tolower(u)
+            if (l ~ /(checksums?\.txt|sha256sums?(\.txt)?|\.sha256)$/) print u
+        }' | awk -v n="${name}" '$0 ~ n".sha256$" {print; found=1; exit} {last=$0} END {if (!found && last != "") print last}')"
+
+    if [ -n "${sums}" ]; then
+        sha="$(_api_fetcher "${sums}" 2>/dev/null | awk -v n="${name}" '
+            NF == 1 && length($1) == 64 {print $1; exit}
+            $2 ~ ("(^|/|\\*)" n "$") {print $1; exit}')"
+        [ -n "${sha}" ] && printf "sha256=%s\\n" "${sha}"
+    fi
+    exit 0
+}
+
+case "${1}" in
+    meta)   _meta ;;
+    probe)  _probe "${2}" "${3}" ;;
+    locate) _locate "${2}" "${3}" ;;
+    *) printf "%s\\n" "usage: ${SELF_NAME} meta|probe|locate" >&2; exit 1 ;;
+esac

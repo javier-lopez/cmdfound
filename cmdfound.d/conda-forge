@@ -1,0 +1,540 @@
+#!/bin/sh
+#description: cmdfound channel - conda-forge, asked for by name and installed by micromamba
+#usage: conda-forge meta | conda-forge index [bytes]
+#       conda-forge search WORDS... | conda-forge probe PACKAGE [VER]
+#       conda-forge locate PACKAGE VER [PROGRAM]
+#       conda-forge obtain PACKAGE VER [PROGRAM] | conda-forge reclaim
+
+CHANNEL="${CMDFOUND_CONDA_FORGE_CHANNEL:-https://conda.anaconda.org/conda-forge}"
+RELEASES="${CMDFOUND_MICROMAMBA_RELEASES:-https://github.com/mamba-org/micromamba-releases/releases}"
+#CMDFOUND_CHANNEL_FILE and not $0: the resolver sources this, and $0 is its own
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+#all the channel has is under it, so one rm -rf removes the channel whole
+CH="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+INDEX="${CH}/index/packages.tsv"
+TOOL_NAME="micromamba"
+#what micromamba 2.9 reads a configuration or a place for its things from,
+#MAMBARC and CONDARC even beside --rc-file, and MAMBA_DRY_RUN and
+#MAMBA_DOWNLOAD_ONLY, each of which leaves an install silently installing
+#nothing (owner, 2026-09-16)
+MM_KEPT_FROM="MAMBARC CONDARC MAMBA_OVERRIDE_RC_FILES CONDA_PKGS_DIRS CONDA_ENVS_DIRS CONDA_ENVS_PATH MAMBA_DEFAULT_ROOT_PREFIX MAMBA_TARGET_PREFIX MAMBA_DRY_RUN MAMBA_DOWNLOAD_ONLY"
+
+_platform() {
+    _util_machine_in
+    case "${_util_machine_in__os}/${_util_machine_in__cpu}" in
+        Linux/x86_64|Linux/amd64)   printf "%s\\n" "linux-64" ;;
+        Linux/aarch64|Linux/arm64)  printf "%s\\n" "linux-aarch64" ;;
+        Linux/ppc64le)              printf "%s\\n" "linux-ppc64le" ;;
+        Darwin/x86_64)              printf "%s\\n" "osx-64" ;;
+        Darwin/arm64)               printf "%s\\n" "osx-arm64" ;;
+        *) return 1 ;;
+    esac
+}
+
+_indexer() {
+    #channeldata.json on stdin, a line per package
+    #    _indexer < channeldata.json  =>  ripgrep<TAB>linux-64,osx-arm64<TAB>a line-oriented search tool
+    LC_ALL=C awk "${JSON_STRINGS}"'
+    function squeeze(v) { gsub(/[ \t\n\r]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); return v }
+    function structure(seg,   i, n, c) {
+        n = length(seg)
+        for (i = 1; i <= n; i++) {
+            c = substr(seg, i, 1)
+            if (c == "{") { depth++; kind[depth] = "o"; expect = "key" }
+            else if (c == "[") { depth++; kind[depth] = "a"; expect = "elem" }
+            else if (c == "}" || c == "]") {
+                if (c == "}" && depth == 3 && name != "")
+                    printf("%s\t%s\t%s\n", name, subdirs, squeeze(summary))
+                depth--; expect = ""
+            }
+            else if (c == ":") expect = "value"
+            else if (c == ",") expect = (kind[depth] == "o") ? "key" : "elem"
+        }
+    }
+    BEGIN { RS = "\""; instr = 0; depth = 0; buf = "" }
+    {
+        #most of what lies between two strings is a colon or a comma alone
+        if (!instr) {
+            if ($0 == ":") expect = "value"
+            else if ($0 == ",") expect = (kind[depth] == "o") ? "key" : "elem"
+            else structure($0)
+            instr = 1; buf = ""; next
+        }
+        buf = buf $0
+        if (substr(buf, length(buf)) == "\\" && match(buf, /\\+$/) && RLENGTH % 2 == 1) { buf = buf "\""; next }
+        instr = 0
+        if (expect == "key") {
+            key[depth] = buf
+            if (depth == 2) {
+                name = (key[1] == "packages") ? unesc(buf) : ""
+                subdirs = ""; summary = ""
+            }
+            next
+        }
+        if (depth == 3 && key[3] == "summary") summary = unesc(buf)
+        else if (depth == 4 && kind[4] == "a" && key[3] == "subdirs") subdirs = subdirs (subdirs == "" ? "" : ",") unesc(buf)
+    }'
+}
+
+_known() {
+    #$1 => package, built for this platform or noarch
+    #    _known ripgrep  =>  0
+    #    _known nosuch   =>  1
+    awk -F'\t' -v n="${1}" -v s="$(_platform)" '
+        $1 == n {
+            k = split($2, a, ",")
+            for (i = 1; i <= k; i++) if (a[i] == s || a[i] == "noarch") { f = 1; exit }
+            exit
+        }
+        END { exit !f }' "${INDEX}"
+}
+
+_micromamba_here() {
+    [ -x "${CH}/tool/current" ] || return 1
+    printf "%s\\n" "${CH}/tool/current"
+}
+
+_release_file() {
+    #$1 => a release tag
+    #    _release_file 2.3.0-0  =>  ${RELEASES}/download/2.3.0-0/micromamba-linux-64
+    printf "%s\\n" "${RELEASES}/download/${1}/${TOOL_NAME}-$(_platform)"
+}
+
+_run_tool() {
+    #$1... => what ${tool}, a micromamba, is asked, writing only in this channel
+    [ -f "${CH}/mambarc" ] || : > "${CH}/mambarc"
+    (
+        unset ${MM_KEPT_FROM} CONDA_PREFIX CONDA_DEFAULT_ENV
+        #micromamba ignores curl's SSL_CERT_FILE, so it gets the user's certificates here
+        case "${MAMBA_CACERT_PATH}:${MAMBA_SSL_VERIFY}" in
+            :|:true|:1|':<true>'|':<system>')
+                _rt__ca="${SSL_CERT_FILE:-${CURL_CA_BUNDLE}}"
+                [ -n "${_rt__ca}" ] && { MAMBA_CACERT_PATH="${_rt__ca}"; export MAMBA_CACERT_PATH; } ;;
+        esac
+        _api_tool_home
+        MAMBA_ROOT_PREFIX="${CH}/root"; export MAMBA_ROOT_PREFIX
+        exec "${tool}" --rc-file "${CH}/mambarc" -r "${CH}/root" "${@}"
+    )
+}
+
+_plan_rows() {
+    #micromamba's --json dry run on stdin, link rows then fetch rows: kind, name,
+    #version, build, subdir, fn, url, sha256, md5, size, a tab apart
+    #    _plan_rows < plan.json  =>  link<TAB>ripgrep<TAB>14.1.1<TAB>h5ef7bb8_0<TAB>linux-64<TAB>...
+    #                                fetch<TAB>ripgrep<TAB>14.1.1<TAB>h5ef7bb8_0<TAB>linux-64<TAB>...
+    _util_json 4 | awk -F'\t' '
+        {
+            n = split($1, p, "/")
+            if (n != 4 || p[1] != "actions" || (p[2] != "LINK" && p[2] != "FETCH")) next
+            v[p[2], p[3], p[4]] = $2
+            if (p[3] + 1 > count[p[2]]) count[p[2]] = p[3] + 1
+        }
+        END {
+            split("LINK FETCH", lists, " ")
+            for (l = 1; l <= 2; l++) {
+                a = lists[l]
+                for (i = 0; i < count[a]; i++)
+                    printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", tolower(a), v[a, i, "name"], v[a, i, "version"],
+                        v[a, i, "build"], v[a, i, "subdir"], v[a, i, "fn"], v[a, i, "url"], v[a, i, "sha256"],
+                        v[a, i, "md5"], v[a, i, "size"])
+            }
+        }'
+}
+
+_solve() {
+    #$1 => package, $2 => version or latest. The plan in plan_rows, the reason in why
+    #    _solve ripgrep latest  =>  0, plan_rows has ripgrep and what it needs
+    #    _solve ripgrep 99      =>  1
+    #    _solve ripgrep latest  =>  2 offline, why says what micromamba said
+    _sv__name="${1}"; _sv__ver="${2}"
+    why=""; plan_rows=""
+    _sv__spec="${_sv__name}"
+    [ X"${_sv__ver}" != X"latest" ] && [ -n "${_sv__ver}" ] && _sv__spec="${_sv__name}=${_sv__ver}"
+    _sv__out="${CH}/tmp/solve.$$"
+    if ! _util_mkdir_p "${CH}/tmp"; then
+        why="${CH}/tmp could not be made to keep micromamba's answer in"
+        return 2
+    fi
+    rm -rf "${_sv__out}" "${_sv__out}.prefix"
+    _run_tool create --dry-run --json -y -p "${_sv__out}.prefix" -c "${CHANNEL}" --override-channels \
+        "${_sv__spec}" > "${_sv__out}" 2>/dev/null
+    _sv__rc="${?}"
+    rm -rf "${_sv__out}.prefix"
+    if [ "${_sv__rc}" -eq "0" ]; then
+        plan_rows="$(_plan_rows < "${_sv__out}")"
+        rm -f "${_sv__out}"
+        [ -n "${plan_rows}" ] && return 0
+        why="micromamba solved ${_sv__spec} and said nothing this channel could read"
+        return 2
+    fi
+    _sv__log="$(_util_json 3 < "${_sv__out}" | awk -F'\t' '
+        { n = split($1, p, "/") }
+        n == 3 && p[1] == "log_history" && p[3] == "level" { level[p[2]] = $2 }
+        n == 3 && p[1] == "log_history" && p[3] == "message" { msg[p[2]] = $2; if (p[2] + 1 > count) count = p[2] + 1 }
+        END { for (i = 0; i < count; i++) if (level[i] == "error" || level[i] == "critical") print msg[i] }')"
+    rm -f "${_sv__out}"
+    if printf "%s\\n" "${_sv__log}" | grep -E 'does not exist|Could not solve|cannot be installed|nothing provides' >/dev/null; then
+        return 1
+    fi
+    why="micromamba could not solve ${_sv__spec}: $(printf "%s\\n" "${_sv__log}" | \
+        awk 'NF {l = $0} END {gsub(/  +/, " ", l); print (l != "" ? l : "it gave no reason")}')"
+    return 2
+}
+
+_conda_meta_record() {
+    #$1 => an environment, $2 => package
+    #    _conda_meta_record "${env}" ripgrep  =>  ${env}/conda-meta/ripgrep-14.1.1-h5ef7bb8_0.json
+    for _cmr__f in "${1}"/conda-meta/*.json; do
+        [ -f "${_cmr__f}" ] || continue
+        _cmr__n="${_cmr__f##*/}"; _cmr__n="${_cmr__n%.json}"; _cmr__n="${_cmr__n%-*}"; _cmr__n="${_cmr__n%-*}"
+        [ X"${_cmr__n}" = X"${2}" ] && { printf "%s\\n" "${_cmr__f}"; return 0; }
+    done
+    return 1
+}
+
+_linked_from() {
+    #$1 => an environment, what it was linked from, relative to this channel
+    #    _linked_from "${env}"  =>  root/pkgs/ripgrep-14.1.1-h5ef7bb8_0
+    #                               root/pkgs/ripgrep-14.1.1-h5ef7bb8_0.conda
+    _lf__chp="$(cd "${CH}" && pwd -P)" || _lf__chp="${CH}"
+    for _lf__f in "${1}"/conda-meta/*.json; do
+        [ -f "${_lf__f}" ] || continue
+        _util_json 1 < "${_lf__f}" | awk -F'\t' -v ch="${CH}/" -v chp="${_lf__chp}/" '
+            $1 == "extracted_package_dir" {d = $2}
+            $1 == "fn" {fn = $2}
+            END {
+                if (d == "") exit
+                if (index(d, ch) == 1) d = substr(d, length(ch) + 1)
+                else if (index(d, chp) == 1) d = substr(d, length(chp) + 1)
+                else exit
+                if (d ~ /(^|\/)\.\.(\/|$)/) exit
+                print d
+                if (fn != "" && fn !~ /\//) { sub(/\/[^\/]*$/, "", d); print d "/" fn }
+            }'
+    done
+}
+
+_run_by_micromamba() {
+    #prints the launcher lines that hand ${program} in ${env} to micromamba run,
+    #HOME, TMPDIR and MM_KEPT_FROM given back to the program as the user had them
+    printf 'set -- "%s" "$@"; _argc="${#}"\n' "${program}"
+    printf '%s\n' "for _n in HOME XDG_CACHE_HOME TMPDIR ${MM_KEPT_FROM}; do"
+    printf '%s\n' '    eval "_k=\"\${${_n}+1}\"; _v=\"\${${_n}}\""; set -- "$@" "${_n}=${_k:-0}${_v}"' 'done'
+    printf '%s\n' 'while [ "${_argc}" -gt "0" ]; do set -- "$@" "${1}"; shift; _argc="$((_argc - 1))"; done'
+    printf '%s\n' "unset ${MM_KEPT_FROM}"
+    printf 'HOME="%s/home"; XDG_CACHE_HOME="%s/home/.cache"; TMPDIR="%s/tmp"\n' "${CH}" "${CH}" "${CH}"
+    printf '%s\n' 'export HOME XDG_CACHE_HOME TMPDIR' '[ -d "${TMPDIR}" ] || mkdir -p "${TMPDIR}"'
+    printf 'exec "%s" --rc-file "%s/mambarc" run -r "%s/root" -p "%s" /bin/sh -c ' "${tool}" "${CH}" "${CH}" "${env}"
+    printf '%s' "'"
+    _rbm__n="3"; for _rbm__v in ${MM_KEPT_FROM}; do _rbm__n="$((_rbm__n + 1))"; done
+    printf '%s' "_i=0; while [ \"\${_i}\" -lt \"${_rbm__n}\" ]; do "
+    printf '%s' '_f="${1#*=}"; case "${_f}" in 0) unset "${1%%=*}" ;; *) export "${1%%=*}=${_f#1}" ;; esac; shift; _i="$((_i + 1))"; done; exec "$@"'
+    printf '%s\n' "' cmdfound \"\$@\""
+}
+
+_valid() {
+    #$1 => package, $2 => version
+    #    _valid ripgrep 14.1.0  =>  0
+    #    _valid -rf 1.0         =>  1
+    #    _valid .rg 1.0         =>  1
+    case "${1}" in
+        ''|[!a-z0-9]*|*[!a-z0-9._-]*) return 1 ;;
+    esac
+    #conda writes an epoch with a !
+    case "${2}" in
+        '') ;;
+        *) _api_is_version "${2}" "!" || return 1 ;;
+    esac
+    return 0
+}
+
+_undo() {
+    #an obtain's EXIT trap: removes what made and explicit still name
+    [ -n "${explicit}" ] && rm -f "${explicit}"
+    [ -n "${made}" ] || return 0
+    rm -rf "${made}"; rmdir "${made%/*}" 2>/dev/null
+}
+
+_meta() {
+    printf "%s\\n" "kind=artifact" "confines=no" "describes=self" "manager=${SELF_NAME}:${TOOL_NAME}" "reclaims=yes"
+    exit 0
+}
+
+_index() {
+    #$1 => bytes, to only say what channeldata.json weighs
+    mode="${1}"
+    if [ X"${mode}" = X"bytes" ]; then
+        _api_answer_bytes_of "${CHANNEL}/channeldata.json"
+    fi
+    _util_mkdir_p "${CH}/index" || exit 1
+    kept="${CH}/index/channeldata.json.part"; part="${kept}.$$"; new="${INDEX}.$$"
+    _api_catalog_fetch "${CHANNEL}/channeldata.json" "${kept}" conda-forge
+    bytes="$(wc -c < "${part}" | awk '{print $1}')"
+    #not cut short from here: the old index could be left half replaced
+    trap '' TERM INT HUP
+    _indexer < "${part}" | LC_ALL=C sort -u > "${new}"
+    rm -f "${part}"
+    _api_catalog_keep "${new}" "${INDEX}" "$(awk 'END {print NR}' "${new}")" "conda-forge's catalog"
+    printf "packages=%s\\n" "$(awk 'END {print NR}' "${INDEX}")"
+    printf "bytes=%s\\n" "${bytes}"
+    exit 0
+}
+
+_search() {
+    #$1... => the words looked for
+    #    _search ripgrep  =>  conda-forge:ripgrep<TAB>-<TAB>a line-oriented search tool
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    #the catalog does not say which program a package gives, hence the dash
+    search_words="${*}" awk -F'\t' -v ch="${SELF_NAME}" "${SEARCH_AWK}"'
+        words_in($1 " " $3) { printf("%s:%s\t-\t%s\n", ch, $1, $3) }' "${INDEX}"
+    exit 0
+}
+
+_probe() {
+    #$1 => a package, $2 => a version
+    #    _probe ripgrep  =>  version=14.1.1
+    #                        bytes=1712345
+    #                        requires=conda-forge:micromamba
+
+    #only when a spec named this channel: nothing maps a command to a package
+    name="${1}"; ver="${2}"
+    [ X"${CMDFOUND_NAMED}" = X"${SELF_NAME}" ] || exit 1
+    [ -z "${name}" ] && exit 1
+    _platform >/dev/null || exit 1
+    _valid "${name}" "${ver}" || exit 1
+    if [ X"${name}" = X"${TOOL_NAME}" ]; then
+        version="${ver}"
+        if [ -z "${version}" ]; then
+            version="$(_api_latest_release)" || {
+                _api_answer_unreachable "the newest micromamba release could not be read from ${RELEASES}"
+            }
+        fi
+        sizef="${CH}/cache/${TOOL_NAME}-${version}-$(_platform).bytes"
+        if [ ! -s "${sizef}" ]; then
+            bytes="$(_api_fetcher_head_size "$(_release_file "${version}")")"
+            if [ -z "${bytes}" ]; then
+                _api_answer_unreachable "micromamba ${version} could not be weighed at ${RELEASES}"
+            fi
+            _util_mkdir_p "${sizef%/*}" && printf "%s\\n" "${bytes}" > "${sizef}"
+        fi
+        printf "version=%s\\n" "${version}"
+        IFS= read -r bytes < "${sizef}"; printf "bytes=%s\\n" "${bytes}"
+        exit 0
+    fi
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    _known "${name}" || exit 1
+    _util_has_word "${CMDFOUND_NO_MANAGER}" "${SELF_NAME}" && exit 1
+
+    if ! tool="$(_micromamba_here)"; then
+        printf "version=%s\\n" "${ver:-latest}"
+        printf "requires=%s\\n" "${SELF_NAME}:${TOOL_NAME}"
+        exit 0
+    fi
+    _solve "${name}" "${ver}"
+    case "${?}" in
+        0) ;;
+        1) exit 1 ;;
+        *) _api_answer_unreachable "${why}" ;;
+    esac
+    version="$(printf "%s\\n" "${plan_rows}" | awk -F'\t' -v n="${name}" '$1 == "link" && $2 == n {print $3; exit}')"
+    [ -z "${version}" ] && exit 1
+    _valid "${name}" "${version}" || exit 1
+    #kept for obtain, to install exactly what was solved
+    plan="${CH}/cache/plans/${name}/${version}"
+    _util_mkdir_p "${plan%/*}" && \
+        printf "%s\\n" "${plan_rows}" | awk -F'\t' '$1 == "link"' | _util_write_aside "${plan}"
+    printf "version=%s\\n" "${version}"
+    printf "bytes=%s\\n" "$(printf "%s\\n" "${plan_rows}" | awk -F'\t' '$1 == "fetch" {t += $10} END {print t + 0}')"
+    printf "requires=%s\\n" "${SELF_NAME}:${TOOL_NAME}"
+    exit 0
+}
+
+_locate() {
+    #$1 => a package, $2 => a version, $3 => the program asked for
+    #    _locate ripgrep 14.1.1 rg  =>  url=https://conda.anaconda.org/conda-forge
+    #                                   bin=rg
+    name="${1}"; ver="${2}"; want="${3}"
+    [ -z "${name}" ] || [ -z "${ver}" ] && exit 1
+    _platform >/dev/null || exit 1
+    _valid "${name}" "${ver}" || exit 1
+    if [ X"${name}" = X"${TOOL_NAME}" ]; then
+        url="$(_release_file "${ver}")"
+        sumf="${CH}/tmp/${TOOL_NAME}.sha256.$$"
+        _util_mkdir_p "${sumf%/*}"
+        _api_fetcher_answered "${url}.sha256" "${sumf}"
+        sum="$(awk 'NR == 1 {print tolower($1)}' "${sumf}" 2>/dev/null)"; rm -f "${sumf}"
+        if ! _util_is_sha256 "${sum}"; then
+            _api_answer_unreachable "the sha256 published beside micromamba ${ver} could not be had"
+        fi
+        printf "url=%s\\n" "${url}"
+        printf "%s\\n" "format=raw" "bin=${TOOL_NAME}" "sha256=${sum}"
+        exit 0
+    fi
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    _known "${name}" || exit 1
+    printf "url=%s\\n" "${CHANNEL}"
+    [ -n "${want}" ] && printf "bin=%s\\n" "${want}"
+    exit 0
+}
+
+_obtain() {
+    #$1 => a package, $2 => a version, $3 => the program asked for
+    name="${1}"; ver="${2}"; want="${3:-${name}}"
+    [ -z "${name}" ] || [ -z "${ver}" ] && exit 1
+    if ! _valid "${name}" "${ver}"; then
+        _api_answer_failed "'${name}' '${ver}' is not a conda package and version this channel will install"
+    fi
+    tool="${CMDFOUND_REQUIRED}"
+    if [ ! -x "${tool}" ]; then
+        _api_answer_unreachable "micromamba is not available to install ${name}"
+    fi
+    _api_is_program_name "${want}" || \
+        _api_answer_failed "'${want}' is not a program's name"
+    if _api_is_unsafe "${CH}" || _api_is_unsafe "${tool}" || _api_is_unsafe "${want}"; then
+        _api_answer_failed "${LAUNCHER_UNSAFE}"
+    fi
+
+    env="${CH}/envs/${name}/${ver}"
+    _util_mkdir_p "${CH}/log" && _util_mkdir_p "${CH}/tmp" || exit 1
+    log="${CH}/log/${name}.log"
+    made=""; explicit=""
+    _util_trap_exit '_undo'
+    if ! _conda_meta_record "${env}" "${name}" >/dev/null; then
+        made="${env}"
+        rm -rf "${env}"
+        _util_mkdir_p "${env%/*}" || exit 1
+        #probe's plan of the last hour; a line without a sum would install unchecked
+        plan="${CH}/cache/plans/${name}/${ver}"
+        if [ -s "${plan}" ] && [ -z "${CMDFOUND_REFRESH}" ] && \
+           [ -n "$(find "${plan}" -mmin -60 2>/dev/null)" ] && \
+           awk -F'\t' '$8 == "" && $9 == "" {unsummed = 1} END {exit unsummed}' "${plan}"; then
+            explicit="${CH}/tmp/explicit.$$"
+            { printf "%s\\n" "@EXPLICIT"; awk -F'\t' '{printf("%s#%s\n", $7, ($8 != "" ? $8 : $9))}' "${plan}"; } > "${explicit}"
+            set -- create -y -p "${env}" --file "${explicit}"
+        else
+            explicit=""
+            spec="${name}"; [ X"${ver}" != X"latest" ] && spec="${name}=${ver}"
+            set -- create -y -p "${env}" -c "${CHANNEL}" --override-channels "${spec}"
+        fi
+        : > "${log}"
+        _api_shown "${log}" _run_tool "${@}"
+        rc="${?}"
+        [ -n "${explicit}" ] && rm -f "${explicit}"
+        if [ "${rc}" -ne "0" ]; then
+            _api_answer_failed "micromamba could not install ${name} ${ver}$(_api_log_hint "${log}")"
+        fi
+    fi
+    top="$(_conda_meta_record "${env}" "${name}")" || {
+        _api_answer_failed "micromamba installed ${name} ${ver} but left no record of ${name}"
+    }
+
+    record="$(_util_json 2 < "${top}")"
+    programs="$(printf "%s\\n" "${record}" | awk -F'\t' '$1 ~ /^files\/[0-9]+$/ && $2 ~ /^bin\/[^\/]+$/ {sub(/^bin\//, "", $2); print $2}' | \
+        while read -r p; do [ -x "${env}/bin/${p}" ] && printf "%s\\n" "${p}"; done)"
+    _api_program_in "${programs}" "${want}" || _api_answer_failed "${name} ${why}"
+    program="${_api_program_in__out}"
+    if ! _api_is_program_name "${program}"; then
+        _api_answer_failed "${name} names a program this channel will not write into a launcher"
+    fi
+
+    run="${CH}/run/${name}/${ver}"
+    _util_mkdir_p "${run}" || exit 1
+    activates=""
+    for d in "${env}/etc/conda/activate.d" "${env}/etc/conda/env_vars.d"; do
+        _util_is_empty_but "${d}" "" || activates="1"
+    done
+    [ -f "${env}/conda-meta/state" ] && activates="1"
+    {
+        printf "%s\\n" "#!/bin/sh"
+        if [ -z "${activates}" ]; then
+            printf "%s\\n" "#written by cmdfound: ${program}, from conda-forge ${name} ${ver}, in its environment"
+            printf 'if [ -z "${CONDA_PREFIX}" ] || [ X"${CONDA_PREFIX}" = X"%s" ]; then\n' "${env}"
+            printf '    CONDA_PREFIX="%s"; PATH="%s/bin${PATH:+:${PATH}}"; export CONDA_PREFIX PATH\n' "${env}" "${env}"
+            printf '    exec "%s/bin/%s" "$@"\n' "${env}" "${program}"
+            printf '%s\n' 'fi'
+            _run_by_micromamba
+        else
+            printf "%s\\n" "#written by cmdfound: ${program}, from conda-forge ${name} ${ver}, run by micromamba"
+            _run_by_micromamba
+        fi
+    } | _util_write_aside "${run}/${program}" 755 || exit 1
+    made=""
+
+    printf "program=%s\\n" "${run}/${program}"
+    printf "asset=%s\\n" "$(printf "%s\\n" "${record}" | awk -F'\t' '$1 == "subdir" {s = $2} $1 == "fn" {f = $2} END {print s "/" f}')"
+    printf "member=%s\\n" "envs/${name}/${ver}"
+    _linked_from "${env}" | while read -r m; do
+        [ -e "${CH}/${m}" ] && printf "member=%s\\n" "${m}"
+    done
+    exit 0
+}
+
+_reclaim() {
+    #not micromamba clean: it misses these environments, kept beside its root
+    if [ X"${CMDFOUND_RECLAIM}" = X"all" ]; then
+        printf "freed=%s\\n" "0"
+        exit 0
+    fi
+    pkgs="root/pkgs"
+    if [ ! -d "${CH}/${pkgs}" ]; then
+        printf "freed=%s\\n" "0"
+        exit 0
+    fi
+    _util_mkdir_p "${CH}/tmp" || exit 1
+    work="${CH}/tmp/reclaim.$$"
+    _util_trap_exit 'rm -f "${work}".*'
+    {
+        find "${CH}/members" -type f -exec cat {} + 2>/dev/null
+        for env in "${CH}"/envs/*/*; do
+            [ -d "${env}/conda-meta" ] && _linked_from "${env}"
+        done
+    } | awk 'NF' | LC_ALL=C sort -u > "${work}.kept"
+    (cd "${CH}" && find "${pkgs}" -path "${pkgs}/cache" -prune -o -type f \
+        \( -name index.json -o -name '*.conda' -o -name '*.tar.bz2' \) -print) 2>/dev/null | \
+        LC_ALL=C awk '
+            /\/info\/index\.json$/ { d = $0; sub(/\/info\/index\.json$/, "", d); dir[d] = 1; next }
+            /\.(conda|tar\.bz2)$/ { file[++n] = $0 }
+            function inside(p,   q) {
+                q = p
+                while (sub(/\/[^\/]*$/, "", q)) if (q in dir) return 1
+                return 0
+            }
+            END {
+                for (d in dir) if (!inside(d)) print d
+                for (i = 1; i <= n; i++) if (!inside(file[i])) print file[i]
+            }' | LC_ALL=C sort -u > "${work}.cache"
+    LC_ALL=C comm -23 "${work}.cache" "${work}.kept" > "${work}.doomed"
+    if [ ! -s "${work}.doomed" ]; then
+        printf "freed=%s\\n" "0"
+        exit 0
+    fi
+    (cd "${CH}" && for env in envs/*/*; do [ -d "${env}" ] && printf "%s\\n" "${env}"; done) > "${work}.held"
+    freed=""
+    if (cd "${CH}" && IFS='
+' && set -f && exec du -sk $(cat "${work}.held" "${work}.doomed")) > "${work}.du" 2>/dev/null; then
+        freed="$(awk -F'\t' -v list="${work}.doomed" '
+            BEGIN { while ((getline p < list) > 0) doomed[p] = 1 }
+            $2 in doomed { t += $1 }
+            END { printf("%.0f\n", t * 1024) }' "${work}.du")"
+    fi
+    (cd "${CH}" && IFS='
+' && set -f && exec rm -rf $(cat "${work}.doomed"))
+    [ -n "${freed}" ] && printf "freed=%s\\n" "${freed}"
+    exit 0
+}
+
+case "${1}" in
+    meta)    _meta ;;
+    index)   _index "${2}" ;;
+    search)  shift; _search "${@}" ;;
+    probe)   _probe "${2}" "${3}" ;;
+    locate)  _locate "${2}" "${3}" "${4}" ;;
+    obtain)  _obtain "${2}" "${3}" "${4}" ;;
+    reclaim) _reclaim ;;
+
+    #no size: the resolver asks one of a channel with reclaims=yes, and this 1
+    #is "count it here", one du over the placement's members, which counts
+    #once a file the environment links from the cache
+    *) printf "%s\\n" "usage: ${SELF_NAME} meta|index|search|probe|locate|obtain|reclaim" >&2; exit 1 ;;
+esac

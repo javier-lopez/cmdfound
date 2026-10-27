@@ -1,0 +1,3 @@
+#description: dbin - the same frozen bincache, plus pkgforge-go and pkgforge-cargo
+#decided: 2026-09-17
+#why: every catalog it reads is frozen

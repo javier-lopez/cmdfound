@@ -1,0 +1,38 @@
+#!/bin/sh
+#a stand-in for sqlite3, for the cmdfound tests. It answers what the
+#nix-portable channel asks of sqlite3 and nothing else: -batch, -noheader,
+#-init FILE, -separator SEP, a database, and SELECT name, package FROM Programs
+#WHERE system = 'SYSTEM';. Its database is text, under a first line that says
+#so: one row a line, name, system and package, tab separated. Anything else it
+#is given is refused the way sqlite3 refuses it. Like sqlite3, it reads
+#~/.sqliterc first unless -init names another file, and a .mode box there
+#draws the rows in a box, which no separator on the command line undoes.
+#FAKE_SQLITE3_LOG, when set, records the database each call read
+
+sep="|"; db=""; sql=""; init="${HOME}/.sqliterc"
+while [ "${#}" -gt "0" ]; do
+    case "${1}" in
+        -batch|-noheader) ;;
+        -init) shift; init="${1}" ;;
+        -separator) shift; sep="${1}" ;;
+        -*) printf "%s\n" "sqlite3: Error: unknown option: ${1}" >&2; exit 1 ;;
+        *) if [ -z "${db}" ]; then db="${1}"; else sql="${1}"; fi ;;
+    esac
+    shift
+done
+
+if [ X"$(head -1 "${db}" 2>/dev/null)" != X"fake programs.sqlite" ]; then
+    printf "%s\n" "Error: in prepare, file is not a database (26)" >&2
+    exit 1
+fi
+system="$(printf "%s\n" "${sql}" | sed -n "s/^SELECT name, package FROM Programs WHERE system = '\([a-z0-9_-]*\)';\$/\1/p")"
+if [ -z "${system}" ]; then
+    printf "%s\n" "Parse error: near \"${sql}\"" >&2
+    exit 1
+fi
+[ -n "${FAKE_SQLITE3_LOG}" ] && printf "%s\n" "${db}" >> "${FAKE_SQLITE3_LOG}"
+if grep -x '.mode box' "${init}" >/dev/null 2>&1; then
+    awk -F'\t' -v s="${system}" 'NR > 1 && $2 == s {printf("│ %s │ %s │\n", $1, $3)}' "${db}"
+    exit 0
+fi
+awk -F'\t' -v s="${system}" -v sep="${sep}" 'NR > 1 && $2 == s {print $1 sep $3}' "${db}"

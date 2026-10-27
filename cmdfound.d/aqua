@@ -1,0 +1,289 @@
+#!/bin/sh
+#description: cmdfound channel - the aqua registry, read as a catalog of names
+#usage: aqua meta | aqua index [bytes] | aqua search WORDS...
+#       aqua probe NAME|OWNER/REPO [VER]
+#       aqua locate NAME|OWNER/REPO VER [PROGRAM]
+#       aqua obtain NAME|OWNER/REPO VER [PROGRAM]
+#covers: arkade - 204 tools, 37 not reached by the other channels (2026-09)
+#covers: webi, binenv - lists of the same github releases, asked for by name
+
+REGISTRY_REPO="https://github.com/aquaproj/aqua-registry"
+#CMDFOUND_CHANNEL_FILE and not $0: the resolver sources this, and $0 is its own
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+#all the channel has is under it, so one rm -rf removes the channel whole
+CH="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+INDEX="${CH}/index/aqua.tsv"
+REGISTRY="${CMDFOUND_AQUA_REGISTRY:-}"
+
+_manager() {
+    #0 when aqua installs this, 1 when locate does through the github channel
+    _api_reads_no "${CMDFOUND_GITHUB_API}" && return 1
+    _util_has_word "${CMDFOUND_NO_MANAGER}" "${SELF_NAME}" && return 1
+    [ -s "${INDEX}.ref" ] || return 1
+    return 0
+}
+
+_indexer() {
+    #the registry's yaml on stdin, a line per command
+    #    repo_owner: acme, repo_name: ripgrepx, files: rgx, description: searches for text  =>  rgx<TAB>acme/ripgrepx<TAB>searches for text
+
+    #awk, not a yaml parser: checked byte for byte against one over every package
+    awk '
+    function emit(name) { printf("%s\t%s/%s\t%s\n", name, owner, repo, desc) }
+    function unquote(v) {
+        if (v ~ /^".*"$/)      { v = substr(v, 2, length(v) - 2); gsub(/\\\\/, "\\", v) }
+        else if (v ~ /^'\''.*'\''$/) { v = substr(v, 2, length(v) - 2); gsub(/'\'''\''/, "'\''", v) }
+        #outside quotes, whitespace then # starts a comment, and yaml drops it
+        else                   { sub(/[ \t]+#.*$/, "", v) }
+        return v
+    }
+    function squeeze(v) { gsub(/[ \t]+/, " ", v); sub(/^ /, "", v); sub(/ $/, "", v); return v }
+    function flush(   list, n, i, parts) {
+        if (in_block) { desc = squeeze(desc); in_block = 0 }
+        if (type != "github_release" || owner == "" || repo == "") return
+        if (ov_true_has_files)  list = ov_true_files
+        else if (pkg_has_files) list = pkg_files
+        else                    list = ""
+        if (list == "") { emit(repo); return }
+        n = split(list, parts, SUBSEP)
+        for (i = 1; i <= n; i++) if (parts[i] != "") emit(parts[i])
+    }
+    #a package may open with any of its keys, type, name or repo_owner: reading
+    #only "- type:" merged it into the package before, and the commands of one
+    #went to the repository of the other - "nsc" came out as nakabonne/ali
+    /^  - [a-z_]+:/ {
+        flush()
+        type = ""; owner = ""; repo = ""; desc = ""; top = ""
+        in_ov = 0; ov_true = 0; sub8 = ""; in_block = 0
+        pkg_has_files = 0; pkg_files = ""; ov_true_has_files = 0; ov_true_files = ""
+        sub(/^  - /, "    ")
+    }
+    in_block {
+        if ($0 ~ /^     / || $0 ~ /^[ \t]*$/) { l = $0; sub(/^ +/, "", l); desc = desc " " l; next }
+        desc = squeeze(desc); in_block = 0
+    }
+    /^    [a-z_]+:/ {
+        key = $1; sub(/:$/, "", key)
+        val = $0; sub(/^    [a-z_]+:[ ]*/, "", val)
+        top = key; in_ov = 0; sub8 = ""
+        if (key == "type")             type = unquote(val)
+        else if (key == "repo_owner")  owner = unquote(val)
+        else if (key == "repo_name")   repo = unquote(val)
+        else if (key == "description") { if (val ~ /^[>|]/) { in_block = 1; desc = "" } else desc = squeeze(unquote(val)) }
+        else if (key == "files")       pkg_has_files = 1
+        next
+    }
+    top == "files" && /^      - name:/ {
+        v = $0; sub(/^      - name:[ ]*/, "", v); pkg_files = pkg_files unquote(v) SUBSEP; next
+    }
+    top == "version_overrides" && /^      - version_constraint:/ {
+        v = $0; sub(/^      - version_constraint:[ ]*/, "", v)
+        in_ov = 1; ov_true = (v == "\"true\""); sub8 = ""; next
+    }
+    top == "version_overrides" && in_ov && /^        [a-z_]+:/ {
+        k = $1; sub(/:$/, "", k); sub8 = k
+        if (k == "files" && ov_true) ov_true_has_files = 1
+        next
+    }
+    top == "version_overrides" && in_ov && ov_true && sub8 == "files" && /^          - name:/ {
+        v = $0; sub(/^          - name:[ ]*/, "", v); ov_true_files = ov_true_files unquote(v) SUBSEP; next
+    }
+    END { flush() }
+    '
+}
+
+_resolve() {
+    #$1 => a name or owner/repo, $2 => the program asked for. 0 sets repo and cmd
+    #    _resolve jqx ""            =>  0, repo acme/jqx, cmd jqx
+    #    _resolve acme/ripgrepx ""  =>  0, repo acme/ripgrepx, cmd rgx
+    #    _resolve dupcmd ""         =>  3, cands left/dup and right/dup
+    _resolve__name="${1}"; _resolve__want="${2}"
+    why=""; repo=""; cmd=""; cands=""; noindex=""
+    _resolve__idx="${INDEX}"
+    if [ ! -s "${_resolve__idx}" ]; then
+        why="${NO_INDEX}"; noindex="1"
+        return 2
+    fi
+
+    case "${_resolve__name}" in
+        */*)
+            cmd="$(awk -F'\t' -v r="${_resolve__name}" -v want="${_resolve__want}" '
+                $2 == r { if (first == "") first = $1
+                          if ($1 == want) hit = $1
+                          n = split(r, p, "/"); if ($1 == p[n]) own = $1 }
+                END { if (hit != "") print hit; else if (own != "") print own
+                      else if (first != "") print first }' "${_resolve__idx}")"
+            [ -z "${cmd}" ] && return 1
+            repo="${_resolve__name}"
+            return 0 ;;
+        *)
+            cands="$(awk -F'\t' -v n="${_resolve__name}" '$1 == n {print $2}' "${_resolve__idx}" | LC_ALL=C sort -u)"
+            [ -z "${cands}" ] && return 1
+            _util_is_one_line "${cands}" || return 3
+            repo="${cands}"; cmd="${_resolve__name}"; return 0 ;;
+    esac
+}
+
+_run_tool() {
+    #$1... => aqua's arguments, run in ${conf} on ${root} with the channel's HOME
+    (
+        cd "${conf}" || exit 1
+        _api_tool_home
+        AQUA_ROOT_DIR="${root}"; AQUA_CONFIG="${conf}/aqua.yaml"
+        AQUA_LOG_LEVEL=warn; AQUA_LOG_COLOR=never
+        AQUA_DISABLE_GITHUB_ARTIFACT_ATTESTATION="${_obtain__att}"
+        export AQUA_ROOT_DIR AQUA_CONFIG AQUA_LOG_LEVEL AQUA_LOG_COLOR \
+            AQUA_DISABLE_GITHUB_ARTIFACT_ATTESTATION
+        exec "${aqua}" "${@}"
+    )
+}
+
+_meta() {
+    printf "%s\\n" "kind=artifact" "confines=no" "describes=self" "manager=github:aquaproj/aqua"
+    exit 0
+}
+
+_index() {
+    #$1 => "bytes" to weigh the registry instead of fetching it
+    mode="${1}"
+    if [ X"${mode}" = X"bytes" ]; then
+        _ib__url="${REGISTRY}"
+        if [ -z "${_ib__url}" ]; then
+            _api_latest_tag_in "${REGISTRY_REPO}/releases" || exit 0
+            _ib__ref="${_api_latest_tag_in__out}"
+            _ib__url="https://raw.githubusercontent.com/aquaproj/aqua-registry/${_ib__ref}/registry.yaml"
+        fi
+        _api_answer_bytes_of "${_ib__url}"
+    fi
+    idx="${INDEX}"
+    _util_mkdir_p "${idx%/*}" || exit 1
+    new="${idx}.$$"
+    if [ -n "${REGISTRY}" ]; then
+        ref="${CMDFOUND_AQUA_REF:-main}"
+        kept="${idx%/*}/registry.local.part"; rm -f "${kept}" "${kept}.$$"
+    else
+        if ! _api_latest_tag_in "${REGISTRY_REPO}/releases"; then
+            _api_answer_unreachable "the tag of the newest aqua catalog could not be read from github.com"
+        fi
+        ref="${_api_latest_tag_in__out}"
+        REGISTRY="https://raw.githubusercontent.com/aquaproj/aqua-registry/${ref}/registry.yaml"
+        kept="${idx%/*}/registry.${ref}.part"
+        for old in "${idx%/*}"/registry.*.part; do
+            [ -f "${old}" ] && [ X"${old}" != X"${kept}" ] && rm -f "${old}"
+        done
+    fi
+    part="${kept}.$$"
+    _api_catalog_fetch "${REGISTRY}" "${kept}" aqua
+    bytes="$(wc -c < "${part}" | awk '{print $1}')"
+    #not cut short from here: the old index could be left half replaced
+    trap '' TERM INT HUP
+    _indexer < "${part}" | LC_ALL=C sort -u > "${new}"
+    rm -f "${part}"
+
+    _api_catalog_keep "${new}" "${idx}" "$(awk 'END {print NR}' "${new}")" "aqua's catalog"
+    printf "%s\\n" "${ref}" | _util_write_aside "${idx}.ref"
+    printf "packages=%s\\n" "$(awk -F'\t' '!seen[$2]++' "${idx}" | awk 'END {print NR}')"
+    printf "names=%s\\n" "$(awk 'END {print NR}' "${idx}")"
+    printf "bytes=%s\\n" "${bytes}"
+    exit 0
+}
+
+_search() {
+    #$1... => the words. A line per repository
+    #    _search text  =>  aqua:acme/ripgrepx<TAB>rgx<TAB>searches for text
+    idx="${INDEX}"
+    [ -s "${idx}" ] || _api_answer_no_index
+    search_words="${*}" awk -F'\t' "${SEARCH_AWK}"'
+        words_in($1 " " $2 " " $3) && !seen[$2]++ { printf("aqua:%s\t%s\t%s\n", $2, $1, $3) }' "${idx}" | LC_ALL=C sort
+    exit 0
+}
+
+_probe() {
+    #$1 => a name or owner/repo, $2 => a version when one was asked for
+    name="${1}"; ver="${2}"
+    [ -z "${name}" ] && exit 1
+    _resolve "${name}"; _api_answer_unresolved "${?}"
+    out="$(_api_channel "${SELF%/*}/github" probe "${repo}" "${ver}")"; rc="${?}"
+    [ -n "${out}" ] && printf "%s\\n" "${out}"
+    #the owner goes back too: a registry could map jq elsewhere
+    [ "${rc}" -eq "0" ] && printf "package=%s\\n" "${repo}"
+    [ "${rc}" -eq "0" ] && _manager && printf "requires=%s\\n" "github:aquaproj/aqua"
+    exit "${rc}"
+}
+
+_locate() {
+    #$1 => a name or owner/repo, $2 => a version, $3 => the program asked for
+    name="${1}"; ver="${2}"; want="${3}"
+    [ -z "${name}" ] && exit 1
+    _resolve "${name}" "${want}"; _api_answer_unresolved "${?}"
+    out="$(_api_channel "${SELF%/*}/github" locate "${repo}" "${ver}")"; rc="${?}"
+    if [ "${rc}" -ne "0" ]; then
+        [ -n "${out}" ] && printf "%s\\n" "${out}"
+        exit "${rc}"
+    fi
+    #the registry knows the program's name, the release does not: ripgrep ships rg
+    printf "%s\\n" "${out}" | awk -F= '$1 != "bin"'
+    printf "bin=%s\\n" "${cmd}"
+    exit 0
+}
+
+_obtain() {
+    #$1 => a name or owner/repo, $2 => a version, $3 => the program asked for
+    name="${1}"; ver="${2}"; want="${3}"
+    [ -z "${name}" ] || [ -z "${ver}" ] && exit 1
+    _resolve "${name}" "${want}"; _api_answer_unresolved "${?}"
+    aqua="${CMDFOUND_REQUIRED}"
+    if [ ! -x "${aqua}" ]; then
+        _api_answer_unreachable "aqua is not available to install ${repo}"
+    fi
+
+    root="${CH}/root"
+    _util_replace_in "${repo}@${ver}" "/@" "_"; confname="${_util_replace_in__out}"
+    conf="${CH}/conf/${confname}"
+    _util_mkdir_p "${root}" && _util_mkdir_p "${conf}" || exit 1
+
+    IFS= read -r _obtain__ref < "${INDEX}.ref"
+    printf "%s\\n" "checksum:" "  enabled: true" "registries:" "  - type: standard" \
+        "    ref: ${_obtain__ref}" "packages:" "  - name: ${repo}@${ver}" \
+        > "${conf}/aqua.yaml"
+
+    #attestations are opt-in: they cost aqua the github cli (42 MB) and seconds each
+    if _api_reads_yes "${CMDFOUND_AQUA_ATTESTATIONS}"; then
+        _obtain__att=""
+    else
+        _obtain__att="true"
+    fi
+    out="$(_run_tool install 2>&1)"
+    if [ "${?}" -ne "0" ]; then
+        _api_answer_failed "$(printf "%s\\n" "${out}" | awk 'NF {l = $0} /checksum/ {c = $0} END {print (c != "" ? c : l)}' | sed 's/\x1b\[[0-9;]*m//g')"
+    fi
+
+    program="$(_run_tool which "${cmd}" 2>/dev/null)"
+    #aqua which also finds programs outside root, and those are not aqua's install
+    case "${program}" in
+        "${root}/"*/../*|"${root}/"*/..) program="" ;;
+        "${root}/"*) ;;
+        *) program="" ;;
+    esac
+    if [ ! -x "${program}" ]; then
+        _api_answer_failed "aqua installed ${repo} but has no program called ${cmd} in it"
+    fi
+
+    asset="${program#${root}/pkgs/github_release/github.com/${repo}/${ver}/}"
+    asset="${asset%%/*}"
+    printf "program=%s\\n" "${program}"
+    printf "asset=%s\\n" "${asset}"
+    printf "member=%s\\n" "root/pkgs/github_release/github.com/${repo}/${ver}" "conf/${confname}"
+    exit 0
+}
+
+case "${1}" in
+    meta)   _meta ;;
+    index)  _index "${2}" ;;
+    search) shift; _search "${@}" ;;
+    probe)  _probe "${2}" "${3}" ;;
+    locate) _locate "${2}" "${3}" "${4}" ;;
+    obtain) _obtain "${2}" "${3}" "${4}" ;;
+    *) printf "%s\\n" "usage: ${SELF_NAME} meta|index|search|probe|locate|obtain" >&2; exit 1 ;;
+esac

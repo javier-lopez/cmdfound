@@ -1,0 +1,3 @@
+#description: ppa - Ubuntu's personal package archives
+#decided: 2026-10-26
+#why: 48 popular ones add 680 commands, mostly parallel versions; no command index; one unreviewed trust root each

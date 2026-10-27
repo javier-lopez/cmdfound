@@ -1,0 +1,293 @@
+# cmdfound is POSIX sh and calls about forty programs of the system. Which
+# implementation answers each of those names is what this workflow varies, and
+# nothing else: the block itself needs no network and no docker daemon, so it
+# runs anywhere.
+#
+# The eight runs cover what the userland of a machine can vary. Three
+# images carry them, because three of those axes are not
+# independent:
+#
+#   - libc is one line of the tree (binstall's getconf GNU_LIBC_VERSION), and
+#     it comes with Alpine rather than earning an image of its own
+#   - the coreutils family and the awk dialect travel together: busybox brings
+#     both, and so does BSD. Only gawk and mawk are worth crossing by hand
+#   - which fetcher exists is a PATH, not a distribution
+#
+# Why the variants are not gated. Every one of them is known red today: the
+# report in that document lists eleven places that break on busybox or BSD, and
+# the owner's decision is to stabilise and human-review the tree before any of
+# them is fixed. So each variant carries continue-on-error, which keeps the
+# workflow from gating on a failure everybody already knows about. It does not
+# hide one: no step is wrapped in `|| true`, no `set +e` swallows a status, the
+# step that runs the block fails when the block fails, and the last step writes
+# what happened into the job summary whatever the job's conclusion is. When the
+# fixes land, the continue-on-error lines come off one at a time, and each is a
+# commit that says which target went green.
+#
+# act. The six Ubuntu and Alpine runs are all `runs-on: ubuntu-*`, so
+# `act -j <job>` runs them locally; the two Alpine ones are container jobs and
+# want `act --bind`, so the workspace they find is this checkout. The macOS run
+# cannot be run by act at all: act has no macOS runner and a BSD userland
+# cannot be emulated, so that one exists only on GitHub.
+
+name: cmdfound portability
+
+on:
+  push:
+    paths:
+      - 'cmdfound'
+      - 'cmdfound.in'
+      - 'cmdfound.d/**'
+      - 'tests/tools.db'
+      - 'tests/tools.sh'
+      - 'tests/cmdfound.d/**'
+      - '.github/workflows/portability.yml'
+  pull_request:
+    paths:
+      - 'cmdfound'
+      - 'cmdfound.in'
+      - 'cmdfound.d/**'
+      - 'tests/tools.db'
+      - 'tests/tools.sh'
+      - 'tests/cmdfound.d/**'
+      - '.github/workflows/portability.yml'
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: sh
+
+jobs:
+
+  # 1 of 8. The gate. dash as /bin/sh, GNU coreutils, findutils, sed, grep and
+  # tar, gawk, glibc, and both fetchers. It is also the only target where GNU
+  # wget's real answers appear: the two Location: lines, the second with
+  # " [following]", and the status 8 on a 404 that every channel reads.
+  gnu-dash-gawk:
+    name: '1 ubuntu: GNU + dash + gawk + curl and wget (gate)'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin the userland this job claims to be
+        run: |
+          set -e
+          sudo update-alternatives --set awk /usr/bin/gawk
+          test "$(readlink -f /bin/sh)" = /usr/bin/dash
+      - name: Record what answers each name here
+        run: sh .github/scripts/userland.sh '1 ubuntu GNU dash gawk'
+      - name: Run the cmdfound block
+        run: cd tests && sh tools.sh cmdfound
+
+  # 2 of 8. The same Ubuntu with mawk in awk's place. Three comments in the
+  # tree claim their awk programs read the same under gawk, mawk, nawk and
+  # busybox awk - aqua:178 over 2303 packages, conda-forge:246 over the whole
+  # of channeldata.json, alpine:636 about the order mawk creates an array
+  # element in - and nothing in the repository has ever checked one of them:
+  # the block runs with whatever awk the machine has.
+  gnu-dash-mawk:
+    name: '2 ubuntu: mawk in place of gawk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Put mawk where awk is looked for
+        run: |
+          set -e
+          # the runner image carries mawk already, but its apt lists are stale
+          # often enough that an install without an update is a coin toss
+          command -v mawk >/dev/null 2>&1 || {
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends mawk
+          }
+          sudo update-alternatives --set awk /usr/bin/mawk
+          awk --version 2>&1 | head -1 | grep -q mawk
+      - name: Record what answers each name here
+        run: sh .github/scripts/userland.sh '2 ubuntu mawk'
+      - name: Run the cmdfound block
+        run: cd tests && sh tools.sh cmdfound
+
+  # 3 of 8. bash as /bin/sh, apart from a BSD userland. macOS has both at
+  # once, so a failure there cannot say which of the two caused it; this job
+  # is what tells them apart. confined-launch:447 reads `declare -x` out of
+  # `export -p` for exactly this shell, and that branch runs nowhere else.
+  # /bin/sh is replaced and not shadowed on the PATH: tests/tools.sh writes
+  # `PATH=../../:/bin:/usr/bin` into the script it runs, so the block's
+  # own `sh` invocations resolve through /bin whatever the job's PATH says.
+  gnu-bash-gawk:
+    name: '3 ubuntu: bash as /bin/sh'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Make /bin/sh bash
+        run: |
+          set -e
+          sudo update-alternatives --set awk /usr/bin/gawk
+          sudo ln -sf /usr/bin/bash /bin/sh
+          test "$(readlink -f /bin/sh)" = /usr/bin/bash
+      - name: Record what answers each name here
+        run: sh .github/scripts/userland.sh '3 ubuntu bash-as-sh'
+      - name: Run the cmdfound block
+        run: cd tests && sh tools.sh cmdfound
+
+  # 4 of 8. GNU wget and no curl, over the whole block. The block already
+  # exercises a few channel calls without curl, from a PATH it builds itself at
+  # tools.db:2155, but the core's own downloads - cmdfound:92-94, the update in
+  # _update, _api_fetcher for every artifact - only ever ran through curl. curl
+  # leaves /usr/bin rather than being shadowed, for the reason in job 3: a
+  # directory in front of the job's PATH does not reach the block.
+  gnu-wget-only:
+    name: '4 ubuntu: GNU wget only, no curl'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Take curl out of the PATH the block gets
+        run: |
+          set -e
+          sudo update-alternatives --set awk /usr/bin/gawk
+          sudo mkdir -p /opt/hidden
+          sudo mv /usr/bin/curl /opt/hidden/curl
+          ! command -v curl
+          command -v wget
+      - name: Record what answers each name here
+        run: sh .github/scripts/userland.sh '4 ubuntu wget-only'
+      - name: Run the cmdfound block
+        run: cd tests && sh tools.sh cmdfound
+      - name: Put curl back
+        if: always()
+        run: sudo mv /opt/hidden/curl /usr/bin/curl || true
+
+  # 5 of 8. Neither fetcher. _api_fetcher then says "install either 'curl' or
+  # 'wget'" and every channel that downloads has to answer that it could not be
+  # asked rather than that the package does not exist. It is the one target
+  # that exercises that sentence over the whole block.
+  gnu-no-fetcher:
+    name: '5 ubuntu: neither curl nor wget'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Take both fetchers out of the PATH the block gets
+        run: |
+          set -e
+          sudo update-alternatives --set awk /usr/bin/gawk
+          sudo mkdir -p /opt/hidden
+          sudo mv /usr/bin/curl /opt/hidden/curl
+          sudo mv /usr/bin/wget /opt/hidden/wget
+          ! command -v curl
+          ! command -v wget
+      - name: Record what answers each name here
+        run: sh .github/scripts/userland.sh '5 ubuntu no-fetcher'
+      - name: Run the cmdfound block
+        run: cd tests && sh tools.sh cmdfound
+      - name: Put both fetchers back
+        if: always()
+        run: |
+          sudo mv /opt/hidden/curl /usr/bin/curl || true
+          sudo mv /opt/hidden/wget /usr/bin/wget || true
+
+  # 6 of 8. busybox ash as /bin/sh, busybox coreutils, find, sed, grep, tar and
+  # awk, musl, busybox wget and no curl. This is the target that finds the most:
+  # wget without --max-redirect, a 404 that exits 1 and not 8, awk's %d
+  # saturating at 2^31, find without -lname, date dropping %N without a word,
+  # tar -J with no xz, no shasum and no openssl, and getconf with no
+  # GNU_LIBC_VERSION.
+  #
+  # Three packages go in, and none of them is part of the userland under test:
+  #
+  #   git   fetches the revision, below
+  #   xz    the block's own fixtures build tar.xz archives for the pkgx and
+  #         nix-portable tests. Nothing cmdfound reads needs it here
+  #   bash  the am channel refuses to answer without one (cmdfound.d/am:282),
+  #         and tools.db asserts the exact sentence that names every catalog
+  #         about to be fetched, am among them. On a bare Alpine, measured, the
+  #         block stops there - at "no local catalog has 'extra'; fetching the
+  #         catalogs of ..." with four names where the test wants five - and
+  #         never reaches one of the findings above. With bash it gets as far as
+  #         the purge tests and reports the find -lname bug on its own:
+  #         "removed 1 placement(s), freed 16.0 KB, 1 still referenced" where
+  #         8.0 KB and 2 were expected, which is a store entry another
+  #         placement still links being deleted. That is the finding, not an
+  #         artefact of installing bash
+  #
+  # A bare Alpine really has no bash, so the path where am opts out is itself
+  # untested; it wants an assertion of its own, and that is a change to
+  # tools.db, not to this workflow.
+  #
+  # actions/checkout is not used here: it is a JavaScript action and the node
+  # GitHub injects into a container is built against glibc, so it cannot start
+  # on musl. git fetches the same revision instead.
+  musl-busybox-wget:
+    name: '6 alpine: musl + busybox + busybox wget, no curl'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    container:
+      image: alpine:3.22
+    steps:
+      - name: Install git to fetch with, and what the block's own fixtures need
+        run: apk add --no-cache git xz bash
+      - name: Fetch this revision
+        run: sh -c 'set -e; if [ -d .git ]; then git config --global --add safe.directory "$(pwd)"; else git init -q .; git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"; git -c protocol.version=2 fetch -q --depth 1 origin "${GITHUB_SHA}"; git checkout -q FETCH_HEAD; fi'
+      - name: Record what answers each name here
+        run: sh .github/scripts/userland.sh '6 alpine busybox-wget'
+      - name: Run the cmdfound block
+        run: cd tests && sh tools.sh cmdfound
+
+  # 7 of 8. The same musl and busybox with curl. Without this job every failure
+  # of job 6 has two possible causes - the userland or the fetcher - and no way
+  # to tell them apart. With it, what job 7 still fails is musl and busybox,
+  # and what only job 6 fails is busybox's wget.
+  musl-busybox-curl:
+    name: '7 alpine: musl + busybox with curl'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    container:
+      image: alpine:3.22
+    steps:
+      - name: Install git, curl, and what the block's own fixtures need
+        run: apk add --no-cache git xz bash curl
+      - name: Fetch this revision
+        run: sh -c 'set -e; if [ -d .git ]; then git config --global --add safe.directory "$(pwd)"; else git init -q .; git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"; git -c protocol.version=2 fetch -q --depth 1 origin "${GITHUB_SHA}"; git checkout -q FETCH_HEAD; fi'
+      - name: Record what answers each name here
+        run: sh .github/scripts/userland.sh '7 alpine busybox-curl'
+      - name: Run the cmdfound block
+        run: cd tests && sh tools.sh cmdfound
+
+  # Commented out while the repository is private: a macOS minute is billed as ten.
+#  # 8 of 8. BSD. bash 3.2 as /bin/sh, BSD sed, grep, find, du, comm and ls,
+#  # bsdtar, and BWK awk. What it is here to catch, item by item:
+#  # cmdfound:311's `shasum -a 256` branch, which runs on no other target;
+#  # cmdfound:642's guard for a date that prints %N as a literal N;
+#  # confined-launch:365's id -u/-g/-G fallback, which is the only path where
+#  # there is no /proc/self/status; cmdfound:2248's find -lname; aqua:455's
+#  # sed \x1b; alpine:604's tar -xzOf over two concatenated gzip streams read by
+#  # libarchive; and confined-launch:447's `export -p` printing `declare -x`.
+#  #
+#  # It is expected to fail early and for a reason that is not a bug in
+#  # cmdfound: tests/tools.sh:131 writes `PATH=../../:/bin:/usr/bin`
+#  # into the script it runs, and macOS keeps neither sha256sum, which the
+#  # block's fixtures use twenty-two times, nor xz, nor Homebrew's bin
+#  # directories, in either of those two. That line is the first thing to fix
+#  # before this target can say anything about cmdfound itself.
+#  #
+#  # act cannot run this job: there is no macOS runner for it and a BSD
+#  # userland cannot be emulated.
+#  bsd-macos:
+#    name: '8 macos: BSD userland + bash 3.2 + BWK awk'
+#    runs-on: macos-14
+#    timeout-minutes: 20
+#    continue-on-error: true
+#    steps:
+#      - uses: actions/checkout@v4
+#      - name: Record what answers each name here
+#        run: sh .github/scripts/userland.sh '8 macos BSD'
+#      - name: Run the cmdfound block
+#        run: cd tests && sh tools.sh cmdfound

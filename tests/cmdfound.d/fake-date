@@ -1,0 +1,54 @@
+#a stand-in for date, for the cmdfound tests, copied as date where a test needs
+#a clock that cannot say nanoseconds. It answers %N the way busybox's date
+#does - musl's strftime drops the conversion without a word, so +%s%N comes
+#back as the seconds alone and +%s.%N as the seconds and a bare stop - and with
+#FAKE_DATE_BSD=1 the way BSD's does, printing a literal N. Measured against
+#busybox 1.37.0 in alpine:3.22. A format with no %N in it goes to the date of
+#this machine, named in FAKE_DATE_REAL because this file is itself called date
+#and would otherwise run itself.
+#
+#FAKE_DATE_TICK names a file it counts its calls in, and each call then answers
+#FAKE_DATE_STEP seconds later than the one before, from a fixed second: that is
+#how a test measures a step that takes seconds without waiting any. It renders
+#the format itself there, so no date of the machine's is asked and no -d, which
+#is GNU's, is needed. Without it the real clock answers.
+#
+#It is not a channel and is not executable, like the other fake-* files here:
+#it is copied where a test needs it
+_fd__n='%N'
+_fd__s='%s'
+
+case "${1}" in
+    +*"${_fd__n}"*) ;;
+    *) exec "${FAKE_DATE_REAL:-/usr/bin/date}" "${@}" ;;
+esac
+
+#what this date puts where the nanoseconds would go: nothing, or BSD's N
+_fd__put=""
+[ -n "${FAKE_DATE_BSD}" ] && _fd__put="N"
+_fd__fmt="${1}"
+while :; do
+    case "${_fd__fmt}" in
+        *"${_fd__n}"*) _fd__fmt="${_fd__fmt%%"${_fd__n}"*}${_fd__put}${_fd__fmt#*"${_fd__n}"}" ;;
+        *) break ;;
+    esac
+done
+
+if [ -z "${FAKE_DATE_TICK}" ]; then
+    exec "${FAKE_DATE_REAL:-/usr/bin/date}" "${_fd__fmt}"
+fi
+
+#a clock that answers a step later every call, so a test can measure a fetch
+#that takes two seconds in no time at all
+_fd__i="0"
+[ -f "${FAKE_DATE_TICK}" ] && { IFS= read -r _fd__i < "${FAKE_DATE_TICK}"; } 2>/dev/null
+case "${_fd__i}" in ''|*[!0-9]*) _fd__i="0" ;; esac
+printf "%s\\n" "$(( _fd__i + 1 ))" > "${FAKE_DATE_TICK}"
+_fd__now="$(( 1700000000 + _fd__i * ${FAKE_DATE_STEP:-2} ))"
+while :; do
+    case "${_fd__fmt}" in
+        *"${_fd__s}"*) _fd__fmt="${_fd__fmt%%"${_fd__s}"*}${_fd__now}${_fd__fmt#*"${_fd__s}"}" ;;
+        *) break ;;
+    esac
+done
+printf "%s\\n" "${_fd__fmt#+}"

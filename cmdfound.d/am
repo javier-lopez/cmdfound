@@ -1,0 +1,213 @@
+#!/bin/sh
+#description: cmdfound channel - AM's catalog of AppImages and portable programs, installed by AM
+#usage: am meta | am index [bytes] | am search WORDS...
+#       am probe NAME | am locate NAME | am obtain NAME
+#covers: appimage.github.io - a list of AppImages, AM's catalog has them
+
+REPO="${CMDFOUND_AM_REPO:-https://raw.githubusercontent.com/ivan-hc/AM/main}"
+#CMDFOUND_CHANNEL_FILE and not $0: the resolver sources this, and $0 is its own
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+#all the channel has is under it, so one rm -rf removes the channel whole
+CH="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+INDEX="${CH}/index/apps.tsv"
+TOOL_NAME="APP-MANAGER"
+
+_platform() {
+    _util_machine_in
+    case "${_util_machine_in__cpu}" in
+        x86_64|amd64)  printf "%s\\n" "x86_64" ;;
+        aarch64|arm64) printf "%s\\n" "aarch64" ;;
+        armv7l)        printf "%s\\n" "armv7l" ;;
+        i686|i386)     printf "%s\\n" "i686" ;;
+        *) return 1 ;;
+    esac
+}
+
+_tool_version() {
+    #prints AM's version, or the one kept when its script cannot be read
+    _tv__f="${CH}/cache/${TOOL_NAME}.version"
+    if _api_is_fresh "${_tv__f}"; then
+        IFS= read -r _tv__kept < "${_tv__f}"
+        printf "%s\\n" "${_tv__kept}"
+        return 0
+    fi
+    _util_mkdir_p "${_tv__f%/*}"
+    _tv__head="$(_api_fetcher "${REPO}/${TOOL_NAME}" 2>/dev/null | head -20)"
+    _tv__v="$(printf "%s\\n" "${_tv__head}" | awk -F'"' '/^AMVERSION=/ {print $2; exit}')"
+    case "${_tv__v}" in
+        ''|*[!A-Za-z0-9._-]*)
+            [ -s "${_tv__f}" ] && { IFS= read -r _tv__kept < "${_tv__f}"
+                                    printf "%s\\n" "${_tv__kept}"; return 0; }
+            return 1 ;;
+    esac
+    printf "%s\\n" "${_tv__v}" | _util_write_aside "${_tv__f}"
+    printf "%s\\n" "${_tv__v}"
+}
+
+_run_tool() {
+    #$1... => what AM is told
+    _util_mkdir_p "${CH}/home"
+    #empty, so curl does not fall back to the user's .curlrc
+    [ -f "${CH}/home/.curlrc" ] || : > "${CH}/home/.curlrc"
+    (
+        unset BASH_ENV ZDOTDIR
+        if [ -n "${CMDFOUND_AM_REPO}" ]; then
+            APPSDB="${APPSDB:-${REPO}/programs/$(_platform)}"; APPSLISTDB="${APPSLISTDB:-${REPO}/programs/$(_platform)-apps}"
+            export APPSDB APPSLISTDB
+        fi
+        exec env HOME="${CH}/home" CURL_HOME="${CH}/home" XDG_BIN_HOME="${CH}/bin" \
+            XDG_DATA_HOME="${CH}/share" XDG_CONFIG_HOME="${CH}/config" XDG_CACHE_HOME="${CH}/cache/am" \
+            appman_location="${CH}/apps" PATH="${CH}/bin:${PATH}" \
+            "${CMDFOUND_REQUIRED}" "${@}"
+    )
+}
+
+_libfuse2() {
+    _api_reads_yes "${CMDFOUND_LIBFUSE2}" && return 0
+    _api_reads_no "${CMDFOUND_LIBFUSE2}" && return 1
+    for _lf__d in /lib /lib64 /usr/lib /usr/lib64 /lib/*-linux-gnu /usr/lib/*-linux-gnu; do
+        [ -e "${_lf__d}/libfuse.so.2" ] && return 0
+    done
+    return 1
+}
+
+_meta() {
+    printf "%s\\n" "kind=artifact" "confines=no" "describes=self" "manager=am:${TOOL_NAME}"
+    exit 0
+}
+
+_index() {
+    #$1 => "bytes" to weigh the list instead of fetching it
+    mode="${1}"
+    _platform >/dev/null || _api_answer_unreachable "AM has no catalog for ${_util_machine_in__cpu}"
+    if [ X"${mode}" = X"bytes" ]; then
+        _api_answer_bytes_of "${APPSLISTDB:-${REPO}/programs/$(_platform)-apps}"
+    fi
+    _util_mkdir_p "${CH}/index" || exit 1
+    kept="${CH}/index/apps.part"; part="${kept}.$$"; new="${INDEX}.$$"
+    list="${APPSLISTDB:-${REPO}/programs/$(_platform)-apps}"
+    _api_catalog_fetch "${list}" "${kept}" AM
+    bytes="$(wc -c < "${part}" | awk '{print $1}')"
+    #not cut short from here: the fetched part would stay behind
+    trap '' TERM INT HUP
+    awk '
+        /^◆ [a-z0-9][a-z0-9._+-]* : / {
+            name = $2; desc = $0
+            sub(/^◆ [^ ]+ : /, "", desc); sub(/[ \t]*#[a-z].*$/, "", desc)
+            printf("%s\t%s\n", name, desc)
+        }' "${part}" | LC_ALL=C sort -u > "${new}"
+    rm -f "${part}"
+    _api_catalog_keep "${new}" "${INDEX}" "$(awk 'END {print NR}' "${new}")" "AM's catalog"
+    printf "packages=%s\\n" "$(awk 'END {print NR}' "${INDEX}")"
+    printf "bytes=%s\\n" "${bytes}"
+    exit 0
+}
+
+_search() {
+    #$1... => the words to look for
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    search_words="${*}" awk -F'\t' "${SEARCH_AWK}"'
+        words_in($1 " " $2) { printf("am:%s\t%s\t%s\n", $1, $1, $2) }' "${INDEX}"
+    exit 0
+}
+
+_probe() {
+    #$1 => a name in AM's catalog, or AM's own script
+    name="${1}"
+    [ -z "${name}" ] && exit 1
+    command -v bash >/dev/null 2>&1 || exit 1
+    if [ X"${name}" = X"${TOOL_NAME}" ]; then
+        version="$(_tool_version)" || {
+            _api_answer_unreachable "the version of AM could not be read from its repository"
+        }
+        printf "version=%s\\n" "${version}"
+        bytes="$(_api_fetcher_head_size "${REPO}/${TOOL_NAME}")"
+        [ -n "${bytes}" ] && printf "bytes=%s\\n" "${bytes}"
+        exit 0
+    fi
+    _platform >/dev/null || exit 1
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    awk -F'\t' -v n="${name}" '$1 == n {f = 1; exit} END {exit !f}' "${INDEX}" || exit 1
+    #version and size are known only to AM's script while it runs
+    printf "%s\\n" "version=latest" "requires=am:${TOOL_NAME}"
+    exit 0
+}
+
+_locate() {
+    #$1 => a name in AM's catalog, or AM's own script
+    name="${1}"
+    [ -z "${name}" ] && exit 1
+    if [ X"${name}" = X"${TOOL_NAME}" ]; then
+        #under any name but am, AM is AppMan, which installs without root
+        printf "url=%s\\n" "${REPO}/${TOOL_NAME}"
+        printf "%s\\n" "format=raw" "bin=appman"
+        exit 0
+    fi
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    awk -F'\t' -v n="${name}" '$1 == n {f = 1; exit} END {exit !f}' "${INDEX}" || exit 1
+    printf "url=%s\\n" "${APPSDB:-${REPO}/programs/$(_platform)}/${name}"
+    printf "%s\\n" "format=raw" "bin=${name}"
+    exit 0
+}
+
+_obtain() {
+    #$1 => a name in AM's catalog
+    app="${1}"
+    [ -z "${app}" ] && exit 1
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    awk -F'\t' -v n="${app}" '$1 == n {f = 1; exit} END {exit !f}' "${INDEX}" || exit 1
+    if [ ! -x "${CMDFOUND_REQUIRED}" ]; then
+        _api_answer_unreachable "AM is not available to install ${app}"
+    fi
+
+    #modules an older AM left are dropped, the new one fetches its own
+    tool_version="$(readlink "${CMDFOUND_REQUIRED}" 2>/dev/null)"
+    tool_version="${tool_version%/*}"; tool_version="${tool_version##*/}"
+    modules="${CH}/apps/appman/modules"
+    _am__marked=""
+    IFS= read -r _am__marked 2>/dev/null < "${modules}/.cmdfound-version"
+    if [ -d "${modules}" ] && [ X"${_am__marked}" != X"${tool_version}" ]; then
+        rm -rf "${modules}"
+    fi
+    _util_mkdir_p "${modules}" && printf "%s\\n" "${tool_version}" > "${modules}/.cmdfound-version"
+
+    _util_mkdir_p "${CH}/log"
+    log="${CH}/log/${app}.log"
+    : > "${log}"
+    if ! _api_shown "${log}" _run_tool -y -i "${app}"; then
+        _api_answer_failed "AM could not install ${app}$(_api_log_hint "${log}")"
+    fi
+    if [ ! -x "${CH}/bin/${app}" ]; then
+        _api_answer_failed "AM installed ${app} but left no program called ${app}"
+    fi
+    if ! _libfuse2; then
+        _api_shown "${log}" _run_tool -y nolibfuse "${app}" || :
+    fi
+
+    run="${CH}/run/${app}"
+    _util_mkdir_p "${run}" || exit 1
+    rm -f "${run}/${app}" && ln -s "${CH}/bin/${app}" "${run}/${app}" || exit 1
+
+    printf "program=%s\\n" "${run}/${app}"
+    printf "asset=%s\\n" "$(head -1 "${CH}/apps/${app}/version" 2>/dev/null | awk '{print $1}')"
+    awk -v ch="${CH}/" '
+        {
+            for (i = 1; i <= NF; i++) {
+                p = $i; gsub(/"/, "", p)
+                if (index(p, ch) == 1) print "member=" substr(p, length(ch) + 1)
+            }
+        }' "${CH}/apps/${app}/remove" 2>/dev/null | LC_ALL=C sort -u
+    exit 0
+}
+
+case "${1}" in
+    meta)   _meta ;;
+    index)  _index "${2}" ;;
+    search) shift; _search "${@}" ;;
+    probe)  _probe "${2}" ;;
+    locate) _locate "${2}" ;;
+    obtain) _obtain "${2}" ;;
+
+    *) printf "%s\\n" "usage: ${SELF_NAME} meta|index|search|probe|locate|obtain" >&2; exit 1 ;;
+esac

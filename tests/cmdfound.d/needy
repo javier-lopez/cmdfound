@@ -1,0 +1,36 @@
+#!/bin/sh
+#a channel whose catalog is read with a program this machine does not have,
+#srneed-helper, which cmdfound gets through another channel first. It only
+#answers names that start with "needy", so no other test ever waits on it
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+h="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+
+_program() {
+    mkdir -p "${CMDFOUND_HOME}/tmp" 2>/dev/null
+    printf "%s\n" '#!/bin/sh' 'printf "%s\n" "needy ran"' > "${CMDFOUND_HOME}/tmp/needy-${1}"
+    printf "%s\n" "${CMDFOUND_HOME}/tmp/needy-${1}"
+}
+
+case "${1}" in
+    meta)   printf "%s\n" "kind=artifact" "confines=no" "describes=self" "needs=srneed-helper" ;;
+    index)  [ X"${2}" = X"bytes" ] && { printf "%s\n" "bytes=20"; exit 0; }
+            command -v srneed-helper >/dev/null 2>&1 || {
+                printf "%s\n" "unreachable=srneed-helper is not here to read the catalog with"; exit 2; }
+            mkdir -p "${h}/index" && srneed-helper > "${h}/index/names" || exit 2
+            printf "%s\n" "packages=$(awk 'END {print NR}' "${h}/index/names")" "bytes=20" ;;
+    probe|locate)
+            case "${2}" in needy*) ;; *) exit 1 ;; esac
+            [ -f "${h}/index/names" ] || { printf "%s\n" "unreachable=no local catalog yet" "needs=index"; exit 2; }
+            grep -x "${2}" "${h}/index/names" >/dev/null || exit 1
+            if [ X"${1}" = X"probe" ]; then
+                printf "%s\n" "version=1.0" "bytes=10" "badge=none"
+            else
+                printf "url=%s\n" "$(_program "${2}")"
+                printf "%s\n" "format=raw" "bin=${2}"
+            fi ;;
+    *) exit 1 ;;
+esac

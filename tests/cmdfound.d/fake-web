@@ -1,0 +1,172 @@
+#!/bin/sh
+#a stand-in for curl and for wget, for the cmdfound tests, copied under either
+#name. It serves the files under FAKE_WEB_ROOT the way a web server would:
+#http(s)://HOST/PATH is FAKE_WEB_ROOT/HOST/PATH, a file PATH.302 holding a url
+#answers with a redirect to it, the way github answers releases/latest, and a
+#file PATH.headers adds its lines to the headers PATH is answered with. It
+#answers what cmdfound and its channels ask and nothing more: curl with one
+#url or several, -o, -D, -w with %{http_code}, -I, -L, -f; wget with -O, -S,
+#--spider, --max-redirect=0.
+#
+#It is also a guard. As curl it serves nothing unless its first argument is -q,
+#and as wget unless it was given --no-config and --no-hsts: without those the
+#real ones read the user's ~/.curlrc and ~/.wgetrc into what cmdfound parses,
+#and GNU wget writes every https host that asked for HSTS into ~/.wget-hsts.
+#A refusal is written to FAKE_WEB_WRONG and is status 97. FAKE_WEB_BUSYBOX=1 is
+#busybox's wget, which refuses --no-config and --no-hsts, and FAKE_WEB_NOHSTS=1
+#a GNU wget older than 1.17, which refuses --no-hsts; both refusals are written
+#to FAKE_WEB_WRONG as well. FAKE_WEB_ASKED, when set, gets a line each time a
+#wget is asked for --help.
+#
+#FAKE_WEB_ENV, when set, records the network variables each request saw - not
+#--help, which asks nothing: every download has to get the network from there
+tool="${0##*/}"
+#what a 404 serves, and what its Content-Length counts
+NOTFOUND="Not Found"
+
+_wrong() {
+    printf "%s\n" "${tool} ${*}" >> "${FAKE_WEB_WRONG:-/dev/null}"
+    exit 97
+}
+
+head=""; follow=""; fail=""; out=""; dump=""; wout=""; urls=""; spider=""; showheaders=""
+if [ X"${tool}" = X"curl" ]; then
+    [ X"${1}" = X"-q" ] || _wrong "without -q first: ${*}"
+    while [ "${#}" -gt "0" ]; do
+        case "${1}" in
+            -o) shift; out="${1}" ;;
+            -D) shift; dump="${1}" ;;
+            -w) shift; wout="${1}" ;;
+            -K) shift; [ X"${1}" = X"-" ] && cat >/dev/null ;;
+            -C|-H|-r) shift ;;
+            -q) ;;
+            --*) _wrong "an option this stand-in does not know: ${1}" ;;
+            -*) case "${1}" in *[!sSILfq-]*) _wrong "an option this stand-in does not know: ${1}" ;; esac
+                case "${1}" in *I*) head="1" ;; esac
+                case "${1}" in *L*) follow="1" ;; esac
+                case "${1}" in *f*) fail="1" ;; esac ;;
+            *) urls="${urls} ${1}" ;;
+        esac
+        shift
+    done
+else
+    for a in "${@}"; do [ X"${a}" = X"--help" ] && [ -n "${FAKE_WEB_ASKED}" ] && printf "%s\n" "--help" >> "${FAKE_WEB_ASKED}"; done
+    if [ -n "${FAKE_WEB_BUSYBOX}" ]; then
+        for a in "${@}"; do
+            case "${a}" in
+                --help) printf "%s\n" "BusyBox v1.37.0 (2026-01-01 00:00:00 UTC) multi-call binary." "" "Usage: wget [-cqS] [--spider] [-O FILE] URL..." >&2; exit 0 ;;
+                --no-config|--no-hsts) printf "%s\n" "wget: unrecognized option '${a}'" >&2; _wrong "busybox given ${a}: ${*}" ;;
+            esac
+        done
+    else
+        noconfig=""; nohsts=""
+        for a in "${@}"; do
+            case "${a}" in
+                --help) if [ -n "${FAKE_WEB_NOHSTS}" ]; then
+                            printf "%s\n" "GNU Wget 1.16.3, a non-interactive network retriever." \
+                                "       --no-config                 do not read any config file"
+                        else
+                            printf "%s\n" "GNU Wget 1.21.4, a non-interactive network retriever." \
+                                "       --no-config                 do not read any config file" \
+                                "       --no-hsts                   disable HSTS" \
+                                "       --hsts-file                 path of HSTS database (will override default)"
+                        fi
+                        exit 0 ;;
+                --no-config) noconfig="1" ;;
+                --no-hsts) [ -z "${FAKE_WEB_NOHSTS}" ] || {
+                               printf "%s\n" "wget: unrecognized option '--no-hsts'" >&2
+                               _wrong "wget 1.16.3 given --no-hsts: ${*}"
+                           }
+                           nohsts="1" ;;
+            esac
+        done
+        [ -n "${noconfig}" ] || _wrong "without --no-config: ${*}"
+        [ -n "${nohsts}${FAKE_WEB_NOHSTS}" ] || _wrong "without --no-hsts: ${*}"
+    fi
+    follow="1"
+    while [ "${#}" -gt "0" ]; do
+        case "${1}" in
+            --no-config|--no-hsts|-c|-q|--header=*) ;;
+            -S) showheaders="1" ;;
+            --spider) spider="1"; head="1" ;;
+            --max-redirect=0) follow="" ;;
+            -O) shift; out="${1}" ;;
+            -O-) out="-" ;;
+            -*) _wrong "an option this stand-in does not know: ${1}" ;;
+            *) urls="${urls} ${1}" ;;
+        esac
+        shift
+    done
+fi
+
+[ -n "${FAKE_WEB_ENV}" ] && printf "%s\n" "${tool} http_proxy=${http_proxy-} HTTP_PROXY=${HTTP_PROXY-} https_proxy=${https_proxy-} HTTPS_PROXY=${HTTPS_PROXY-} no_proxy=${no_proxy-} NO_PROXY=${NO_PROXY-} SSL_CERT_FILE=${SSL_CERT_FILE-} CURL_CA_BUNDLE=${CURL_CA_BUNDLE-} SSL_CERT_DIR=${SSL_CERT_DIR-}" >> "${FAKE_WEB_ENV}"
+
+_answer() {
+    #$1 => url. Leaves in code the status, in file what is served, and in
+    #headers what it is answered with, the redirect before it included. The
+    #headers are only made when something reads them
+    file="${FAKE_WEB_ROOT}/${1#*://}"; code="404"; headers=""; location=""
+    if [ -f "${file}" ]; then
+        code="200"
+    elif [ -f "${file}.302" ]; then
+        code="302"; IFS= read -r location < "${file}.302"
+        [ -n "${head}${dump}${showheaders}" ] && headers="$(printf 'HTTP/1.1 302\r\nLocation: %s\r\n\r' "${location}")
+"
+        [ -n "${follow}" ] || return 0
+        file="${FAKE_WEB_ROOT}/${location#*://}"; code="404"
+        [ -f "${file}" ] && code="200"
+    fi
+    [ -n "${head}${dump}${showheaders}" ] || return 0
+    if [ X"${code}" = X"200" ]; then
+        headers="${headers}$(printf 'HTTP/1.1 200\r\nContent-Length: %s\r\nETag: "w1"\r\n' "$(wc -c < "${file}" | awk '{print $1}')"
+            [ -f "${file}.headers" ] && cat "${file}.headers"
+            printf '\r')"
+    else
+#a server saying a file is not there answers with a page saying so, and says
+#how long that page is: a Content-Length comes with a 404 as it does with a
+#200, and the number in it is the error page's and never the file's
+        headers="${headers}$(printf 'HTTP/1.1 %s\r\nContent-Length: %s\r\n\r' "${code}" "$(printf "%s\n" "${NOTFOUND}" | wc -c | awk '{print $1}')")"
+    fi
+}
+
+if [ X"${tool}" = X"wget" ]; then
+    for url in ${urls}; do
+        _answer "${url}"
+        [ -n "${showheaders}" ] && printf "%s\n" "${headers}" | tr -d '\r' | awk 'NF {print "  " $0}' >&2
+#wget -S indents the headers it was answered with by two spaces and then says,
+#unindented, which redirect it is taking. That line ends in " [following]",
+#and a reader that takes the rest of a header's line rather than its first
+#word reads the word as part of the url
+        [ -n "${showheaders}" ] && [ -n "${location}" ] && \
+            printf "%s\n" "Location: ${location} [following]" >&2
+        [ X"${code}" = X"200" ] || exit 8
+        [ -n "${spider}" ] && continue
+        if [ X"${out}" = X"-" ]; then cat "${file}"; else cp "${file}" "${out}"; fi
+    done
+    exit 0
+fi
+
+for url in ${urls}; do
+    _answer "${url}"
+    [ -n "${dump}" ] && printf "%s\n" "${headers}" > "${dump}"
+    if [ -n "${head}" ]; then
+        printf "%s\n" "${headers}"
+    elif [ X"${code}" = X"200" ]; then
+        if [ -n "${out}" ]; then cp "${file}" "${out}"; else cat "${file}"; fi
+    elif [ -n "${fail}" ]; then
+        exit 22
+    elif [ -n "${out}" ]; then
+        printf "%s\n" "${NOTFOUND}" > "${out}"
+    fi
+    if [ -n "${wout}" ]; then
+        w="${wout}"
+        while :; do
+            case "${w}" in
+                *'%{http_code}'*) w="${w%%'%{http_code}'*}${code}${w#*'%{http_code}'}" ;;
+                *) break ;;
+            esac
+        done
+        printf "%b" "${w}"
+    fi
+done
+exit 0

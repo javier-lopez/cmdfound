@@ -1,0 +1,21 @@
+#!/bin/sh
+#a channel that serves the program another channel reads its catalog with, so
+#that cmdfound getting a program for its own use is tested the way any other
+#request is. It only answers srneed-helper, so no other test ever sees it
+
+_program() {
+    mkdir -p "${CMDFOUND_HOME}/tmp" 2>/dev/null
+    printf "%s\n" '#!/bin/sh' 'printf "%s\n" "needyprog" "needyother" "needyclass"' \
+        > "${CMDFOUND_HOME}/tmp/lender-helper"
+    printf "%s\n" "${CMDFOUND_HOME}/tmp/lender-helper"
+}
+
+case "${1}" in
+    meta)   printf "%s\n" "kind=artifact" "confines=no" "describes=self" ;;
+    probe)  [ X"${2}" = X"srneed-helper" ] || exit 1
+            printf "%s\n" "version=1.0" "bytes=100" "badge=none" ;;
+    locate) [ X"${2}" = X"srneed-helper" ] || exit 1
+            printf "url=%s\n" "$(_program)"
+            printf "%s\n" "format=raw" "bin=srneed-helper" ;;
+    *) exit 1 ;;
+esac

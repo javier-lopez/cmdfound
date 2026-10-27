@@ -1,0 +1,23 @@
+#!/bin/sh
+#a stand-in for mv, for the cmdfound tests. With FAKE_MV_HOLD naming a file it
+#waits for that file before moving anything a run built under its own pid - a
+#source ending in a dot and a number - into place, which is the moment an
+#update becomes what readers read: that is how a reader is made to look while
+#an update is halfway through. FAKE_MV_AT, when set, is the file it writes on
+#reaching the hold, which is what a test waits for. After twenty seconds it
+#moves anyway: a test that never writes the file fails, and does not hang the
+#suite
+
+case "${1}" in
+    *.[0-9]*)
+        if [ -n "${FAKE_MV_HOLD}" ]; then
+            [ -n "${FAKE_MV_AT}" ] && : > "${FAKE_MV_AT}"
+            held="0"
+            while [ ! -f "${FAKE_MV_HOLD}" ] && [ "${held}" -lt "400" ]; do
+                sleep 0.05; held="$((held + 1))"
+            done
+        fi ;;
+esac
+
+[ -x /bin/mv ] && exec /bin/mv "${@}"
+exec /usr/bin/mv "${@}"

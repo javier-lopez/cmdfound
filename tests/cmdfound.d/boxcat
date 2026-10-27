@@ -1,0 +1,35 @@
+#!/bin/sh
+#a catalog that is quick to fetch, of a channel that confines. Arriving first
+#must not make it the answer while a native catalog can still have the name.
+#It only has names that start with "class", and needyclass, which needy has
+#too once its catalog can be read, so no other test ever waits on it
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+h="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+
+_program() {
+    mkdir -p "${CMDFOUND_HOME}/tmp" 2>/dev/null
+    printf "%s\n" '#!/bin/sh' 'printf "%s\n" "boxcat ran"' > "${CMDFOUND_HOME}/tmp/boxcat-${1}"
+    printf "%s\n" "${CMDFOUND_HOME}/tmp/boxcat-${1}"
+}
+
+case "${1}" in
+    meta)   printf "%s\n" "kind=confinement" "confines=yes" "describes=self" ;;
+    index)  [ X"${2}" = X"bytes" ] && { printf "%s\n" "bytes=10"; exit 0; }
+            mkdir -p "${h}/index" && printf "%s\n" "classname" "classboxed" "needyclass" > "${h}/index/names"
+            printf "%s\n" "packages=3" "bytes=10" ;;
+    probe|locate)
+            case "${2}" in class*|needyclass) ;; *) exit 1 ;; esac
+            [ -f "${h}/index/names" ] || { printf "%s\n" "unreachable=no local catalog yet" "needs=index"; exit 2; }
+            grep -x "${2}" "${h}/index/names" >/dev/null || exit 1
+            if [ X"${1}" = X"probe" ]; then
+                printf "%s\n" "version=1.0" "bytes=10" "badge=none"
+            else
+                printf "url=%s\n" "$(_program "${2}")"
+                printf "%s\n" "format=raw" "bin=${2}"
+            fi ;;
+    *) exit 1 ;;
+esac

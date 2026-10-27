@@ -1,0 +1,62 @@
+#!/bin/sh
+#description: build cmdfound, one script anyone can download, from cmdfound.in and the channels in cmdfound.d
+#usage: ./build [OUTPUT]
+
+#the channels go after the end of the code, past an exit the shell never reads
+#beyond, so a run that does not need them does not parse them. _bundle_in reads
+#them back out of the file itself, once, when there is no cmdfound.d beside it.
+#Everything else is cmdfound.in as it is, with BUNDLE_ID filled in
+
+MARK="__CMDFOUND_BUNDLE__"
+FILE="__CMDFOUND_FILE__"
+cd "$(dirname "${0}")" || exit 1
+out="${1:-cmdfound}"
+
+_die() {
+    printf "%s\\n" "build: ${*}" >&2
+    rm -f "${out}.$$"
+    exit 1
+}
+
+_sum() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+    else shasum -a 256 | awk '{print $1}'
+    fi
+}
+
+[ -f cmdfound.in ] || _die "no cmdfound.in here"
+grep -q '^BUNDLE_ID=""$' cmdfound.in || _die "cmdfound.in has no BUNDLE_ID=\"\" line"
+
+#a file ends where the next one starts, and awk gives back a final newline: a
+#channel without one would come out a byte longer
+for f in cmdfound.d/*; do
+    [ -f "${f}" ] || continue
+    case "${f}" in *.discarded) continue ;; esac
+    grep -q -e "^${MARK}" -e "^${FILE} " "${f}" && _die "${f} has a line starting ${MARK} or ${FILE}"
+    [ -s "${f}" ] && [ -z "$(tail -c1 "${f}" | tr -d '\n')" ] || _die "${f} does not end with a newline"
+done
+
+id="$(for f in cmdfound.d/*; do case "${f}" in *.discarded) continue ;; esac; [ -f "${f}" ] && printf "%s\\n" "${f##*/}" && cat "${f}"; done | _sum)"
+[ -n "${id}" ] || _die "could not sum the channels"
+
+awk -v id="${id}" '
+    /^#\.\/build writes in the sum of the channels/ {
+        print "#built by ./build from cmdfound.in and cmdfound.d: edit those, not this file"; next }
+    $0 == "BUNDLE_ID=\"\"" { print "BUNDLE_ID=\"" id "\""; next }
+    { print }
+' cmdfound.in > "${out}.$$" || _die "could not write ${out}"
+
+{
+    printf "%s\n" '' '#the channels this file carries, read by _bundle_in and never run: the code ends here' 'exit 1' "${MARK}"
+    for f in cmdfound.d/*; do
+        [ -f "${f}" ] || continue
+        #a name.discarded is a source ruled out, a note for whoever adds a channel
+        case "${f}" in *.discarded) continue ;; esac
+        mode="644"; [ -x "${f}" ] && mode="755"
+        printf "%s %s %s\n" "${FILE}" "${mode}" "${f##*/}"
+        cat "${f}"
+    done
+} >> "${out}.$$" || _die "could not write the channels"
+
+sh -n "${out}.$$" || _die "${out} does not parse"
+chmod 755 "${out}.$$" && mv -f "${out}.$$" "${out}" || _die "could not put ${out} in place"

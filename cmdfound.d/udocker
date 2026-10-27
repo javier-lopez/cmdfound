@@ -1,0 +1,615 @@
+#!/bin/sh
+#description: cmdfound channel - udocker, a runtime that runs a catalog's programs in containers without a daemon or root
+#usage: udocker meta | udocker probe CATALOG/PACKAGE VER
+#       udocker probe udocker [VER] | udocker locate udocker VER
+#       udocker obtain CATALOG/PACKAGE VER | udocker reclaim
+
+#CMDFOUND_CHANNEL_FILE and not $0: the resolver sources this, and $0 is its own
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+
+#a bare name is asked of every channel on every resolution: answered first
+case "${1}" in
+    probe)
+        case "${2}" in
+            */*) [ -n "${CMDFOUND_IMAGE}" ] || exit 1 ;;
+            udocker) [ X"${CMDFOUND_NAMED}" = X"${SELF_NAME}" ] || exit 1 ;;
+            *) exit 1 ;;
+        esac ;;
+    meta|locate|obtain|reclaim) ;;
+    *) exit 1 ;;
+esac
+
+TOOL_NAME="udocker"
+PYPI="${CMDFOUND_UDOCKER_PYPI:-https://pypi.org/pypi}"
+#the engines udocker 1.3.17 requires and where it gets them, until a udocker
+#here can be asked
+RELEASE="1.2.11"
+ENGINES="${CMDFOUND_UDOCKER_ENGINES:-https://download.a.incd.pt/udocker/udocker-englib-${RELEASE}.tar.gz}"
+#all the channel has is under it, so one rm -rf removes the channel whole
+CH="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+
+_sdist() {
+    #$1 => a version, none for the newest. Sets sdist_version, sdist_url, sdist_bytes, sdist_sha256
+    #    _sdist 1.3.17  =>  0, sdist_url https://files.pythonhosted.org/.../udocker-1.3.17.tar.gz
+    #    _sdist 0.0.0   =>  1  no such release, or no sdist in it
+    #    _sdist         =>  2  PyPI out of reach and nothing cached
+    _sd__want="${1}"
+    sdist_version=""; sdist_url=""; sdist_bytes=""; sdist_sha256=""
+    _sd__f="${CH}/cache/pypi.json"
+    _util_mkdir_p "${CH}/cache" || return 2
+    if ! _api_is_fresh "${_sd__f}"; then
+        if _api_fetcher_answered "${PYPI}/${TOOL_NAME}/json" "${_sd__f}.$$"; then
+            mv "${_sd__f}.$$" "${_sd__f}" 2>/dev/null
+        else
+            rm -f "${_sd__f}.$$"
+            [ -s "${_sd__f}" ] || return 2
+        fi
+    fi
+    _sd__answer="$(_util_json 5 containers < "${_sd__f}" | awk -F'\t' -v want="${_sd__want}" '
+        $1 == "info/version" { newest = $2; next }
+        {
+            n = split($1, p, "/")
+            if (p[1] != "releases" || n < 4) next
+            f = (n == 5) ? p[4] "/" p[5] : p[4]
+            v[p[2], p[3], f] = $2
+            if (p[3] + 1 > count[p[2]]) count[p[2]] = p[3] + 1
+        }
+        END {
+            r = (want != "") ? want : newest
+            for (i = 0; i < count[r]; i++) {
+                if (v[r, i, "packagetype"] != "sdist") continue
+                printf("%s\n%s\n%s\n%s\n", r, v[r, i, "url"], v[r, i, "size"], v[r, i, "digests/sha256"])
+                exit
+            }
+        }')"
+    [ -n "${_sd__answer}" ] || return 1
+    { IFS= read -r sdist_version; IFS= read -r sdist_url; IFS= read -r sdist_bytes; IFS= read -r sdist_sha256; } <<EOF
+${_sd__answer}
+EOF
+    #a path is a PyPI on this machine, for the tests
+    _api_is_version "${sdist_version}" || return 1
+    case "${sdist_url}" in
+        https://*|/*) ;;
+        *) return 1 ;;
+    esac
+    _util_is_number "${sdist_bytes}" || sdist_bytes=""
+    _util_is_sha256 "${sdist_sha256}" || sdist_sha256=""
+    return 0
+}
+
+_tool_real() {
+    #$1 => tool/current
+    #    _tool_real "${CH}/tool/current"  =>  0, tool ${CH}/tool/1.3.17/.../maincmd.py
+
+    #the real path: maincmd.py finds its package from the path it was started by
+    tool="$(_util_realpath "${1}")"
+    [ -f "${tool}" ] && [ ! -L "${tool}" ]
+}
+
+_run_tool() {
+    #$1 => setup, defaults or none: may udocker set its engines up. Then udocker's arguments
+    _util_mkdir_p "${CH}/home"; _util_mkdir_p "${CH}/tmp"; _util_mkdir_p "${CH}/xdg"; _util_mkdir_p "${CH}/ud"
+    (
+        case "${1}" in
+            setup) ;;
+            defaults) unset UDOCKER_TARBALL ;;
+            *) UDOCKER_TARBALL=""; export UDOCKER_TARBALL ;;
+        esac
+        shift
+        unset CURL_HOME PROOT_TMP_DIR UDOCKER_BIN UDOCKER_LIB UDOCKER_DOC UDOCKER_REPOS UDOCKER_LAYERS UDOCKER_CONTAINERS
+        HOME="${CH}/home"; XDG_CONFIG_HOME="${CH}/home/.config"; UDOCKER_DIR="${CH}/ud"
+        UDOCKER_KEYSTORE="${CH}/ud/keystore"; UDOCKER_TMP="${CH}/tmp"; XDG_RUNTIME_DIR="${CH}/xdg"
+        export HOME XDG_CONFIG_HOME UDOCKER_DIR UDOCKER_KEYSTORE UDOCKER_TMP XDG_RUNTIME_DIR
+        exec python3 -E -s "${tool}" ${allow_root:+--allow-root} "${@}"
+    )
+}
+
+_version_ge() {
+    #$1 => a version, $2 => the one it has to reach
+    #    _version_ge 1.2.11 1.2.9  =>  0
+    #    _version_ge 1.1.9 1.2     =>  1
+    _vg__a="${1}."; _vg__b="${2}."
+    while [ -n "${_vg__a}${_vg__b}" ]; do
+        _vg__x="${_vg__a%%.*}"; _vg__a="${_vg__a#*.}"
+        _vg__y="${_vg__b%%.*}"; _vg__b="${_vg__b#*.}"
+        _util_is_number "${_vg__x}" || _vg__x="0"
+        _util_is_number "${_vg__y}" || _vg__y="0"
+        [ "${_vg__x}" -gt "${_vg__y}" ] && return 0
+        [ "${_vg__x}" -lt "${_vg__y}" ] && return 1
+    done
+    return 0
+}
+
+_engines() {
+    #sets engines_release and engines_url, as udocker's version says, kept per version
+    #    _engines  =>  engines_release 1.2.11, engines_url .../udocker-englib-1.2.11.tar.gz
+    engines_release="${RELEASE}"; engines_url="${ENGINES}"
+    [ -n "${tool}" ] || return 0
+    _en__v="${tool#"${CH}/tool/"}"; _en__v="${_en__v%%/*}"
+    case "${_en__v}" in
+        ''|*[!0-9A-Za-z.+-]*|"${tool}") return 0 ;;
+    esac
+    _en__f="${CH}/cache/engines.${_en__v}"
+    if [ ! -s "${_en__f}" ]; then
+        [ X"$(id -u)" = X"0" ] && allow_root="1"
+        _en__out="$(_run_tool defaults version 2>/dev/null </dev/null)" \
+            || return 0
+        _en__rel=""; _en__url=""
+        while IFS= read -r _en__line; do
+            case "${_en__line}" in
+                "tarball_release: "*) _en__rel="${_en__line#tarball_release: }" ;;
+                "tarball: "*) _en__url="${_en__line#tarball: }"; _en__url="${_en__url%% *}" ;;
+            esac
+        done <<EOF
+${_en__out}
+EOF
+        case "${_en__rel}" in
+            ''|*[!0-9.]*) return 0 ;;
+        esac
+        [ -n "${CMDFOUND_UDOCKER_ENGINES}" ] && _en__url="${CMDFOUND_UDOCKER_ENGINES}"
+        _util_mkdir_p "${CH}/cache" && \
+            printf "%s\\n" "${_en__rel}" "${_en__url:-${ENGINES}}" | _util_write_aside "${_en__f}"
+    fi
+    { IFS= read -r engines_release; IFS= read -r engines_url; } < "${_en__f}"
+    case "${engines_release}" in
+        ''|*[!0-9.]*) engines_release="${RELEASE}" ;;
+    esac
+    [ -n "${engines_url}" ] || engines_url="${ENGINES}"
+    return 0
+}
+
+_engines_due() {
+    #0 when the engines are missing or too old
+    _ed__have=""
+    [ -f "${CH}/ud/lib/VERSION" ] && IFS= read -r _ed__have < "${CH}/ud/lib/VERSION"
+    [ -n "${_ed__have}" ] || return 0
+    ! _version_ge "${_ed__have}" "${engines_release}"
+}
+
+_engines_bytes() {
+    #sets engines_bytes to the engines' download size, empty when unknown
+    engines_bytes=""
+    _eb__url="${engines_url}"; _eb__f="${CH}/cache/engines-${engines_release}.bytes"
+    if [ -n "${UDOCKER_TARBALL}" ]; then
+        _eb__url="${UDOCKER_TARBALL%% *}"; _eb__f=""
+    fi
+    if [ -n "${_eb__f}" ] && [ -s "${_eb__f}" ]; then
+        IFS= read -r engines_bytes < "${_eb__f}"
+    else
+        engines_bytes="$(_api_fetcher_head_size "${_eb__url}")"
+        _util_is_number "${engines_bytes}" || { engines_bytes=""; return 0; }
+        [ -z "${_eb__f}" ] || { _util_mkdir_p "${CH}/cache" && printf "%s\\n" "${engines_bytes}" > "${_eb__f}"; }
+    fi
+    _util_is_number "${engines_bytes}" || engines_bytes=""
+}
+
+_image_spec() {
+    #$1 => repository[:tag][@sha256:<hex>]. Sets image_repo, image_tag, image_spec, image_label
+    #    _image_spec alpine                 =>  0, image_spec alpine:latest
+    #    _image_spec alpine:3@sha256:<hex>  =>  0, image_spec alpine:sha256:<hex>, image_label alpine:3
+    #    _image_spec localhost:5000/alpine  =>  1  udocker splits at the first :
+    _is__ref="${1}"; _is__digest=""
+    _api_is_image_ref "${_is__ref}" || return 1
+    case "${_is__ref}" in
+        *@*) _is__digest="${_is__ref#*@}"; _is__ref="${_is__ref%%@*}" ;;
+    esac
+    image_label="${_is__ref}"; image_repo="${_is__ref}"; image_tag="latest"
+    case "${_is__ref##*/}" in
+        *:*) image_tag="${_is__ref##*:}"; image_repo="${_is__ref%:*}" ;;
+    esac
+    case "${image_repo}" in
+        ''|[!a-z0-9]*|*[!a-z0-9._/-]*|*..*|*//*|*/) return 1 ;;
+    esac
+    case "${image_tag}" in
+        ''|[!A-Za-z0-9_]*|*[!A-Za-z0-9_.-]*) return 1 ;;
+    esac
+    if [ -n "${_is__digest}" ]; then
+        _util_is_digest "${_is__digest}" || return 1
+        #udocker takes repo@digest only for a bare name, repo:sha256:<hex> for any
+        image_tag="${_is__digest}"
+    fi
+    image_spec="${image_repo}:${image_tag}"
+    return 0
+}
+
+_image_here() {
+    #0 when the image is pulled whole: udocker writes TAG before the layers
+    [ -f "${CH}/pulled/${image_repo}/${image_tag}" ] && [ -f "${CH}/ud/repos/${image_repo}/${image_tag}/TAG" ]
+}
+
+_placement() {
+    #$1 => catalog/package, $2 => version. Sets catalog and package
+    #    _placement alpine/figlet 2.2.5-r3  =>  0, catalog alpine, package figlet
+    #    _placement figlet 2.2.5-r3         =>  1
+    #    _placement alpine/figlet ../x      =>  2
+    case "${1}" in
+        [a-z0-9]*/[A-Za-z0-9]*) ;;
+        *) return 1 ;;
+    esac
+    catalog="${1%%/*}"; package="${1#*/}"
+    _api_is_catalog_package "${catalog}/${package}/${2}" || return 2
+}
+
+_placed() {
+    #$1 => catalog/package, $2 => version. Sets placed_id to its container, when still here
+    #    _placed alpine/figlet 2.2.5-r3  =>  0, placed_id 6d3f...-...-...-...-...
+    placed_id=""
+    _pl__f="${CH}/containers/${1}/${2}"
+    [ -f "${_pl__f}" ] || return 1
+    IFS="	" read -r placed_id _pl__spec < "${_pl__f}"
+    case "${placed_id}" in
+        ''|*[!a-z0-9-]*) placed_id=""; return 1 ;;
+    esac
+    [ -d "${CH}/ud/containers/${placed_id}/ROOT" ] || { placed_id=""; return 1; }
+}
+
+_keystore() {
+    #writes udocker's keystore from the user's docker logins, which udocker does not read
+    rm -f "${CH}/ud/keystore"
+    _ks__config="${DOCKER_CONFIG:-${HOME}/.docker}/config.json"
+    [ -f "${_ks__config}" ] && [ -r "${_ks__config}" ] || return 0
+    _ks__left="$(
+        umask 077
+        _util_json 3 containers < "${_ks__config}" | LC_ALL=C awk -F'\t' -v out="${CH}/ud/keystore.$$" '
+            #a key of the docker file as the host udocker asks for: the
+            #scheme and any path gone, and Docker Hub by the name it pulls from
+            function host(k,   h) {
+                h = k; sub(/^[A-Za-z]+:\/\//, "", h); sub(/\/.*$/, "", h)
+                if (h == "index.docker.io" || h == "docker.io" || h == "registry-1.docker.io" || h == "registry.hub.docker.com") h = "registry-1.docker.io"
+                return h
+            }
+            $1 == "credsStore" && $2 != "" { store = $2; next }
+            $1 ~ /^credHelpers\/./ && $2 != "" { helper[host(substr($1, 13))] = 1; next }
+            $2 == "{" && $1 ~ /^auths\/./ && !((substr($1, 7)) in seen) { k = substr($1, 7); seen[k] = 1; keys[++n] = k; next }
+            $1 ~ /^auths\/.+\/auth$/ { auth[substr($1, 7, length($1) - 11)] = $2; next }
+            END {
+                m = 0; left = ""
+                for (i = 1; i <= n; i++) {
+                    h = host(keys[i])
+                    if (h !~ /^[A-Za-z0-9.-]+(:[0-9]+)?$/ || (h in written)) continue
+                    a = auth[keys[i]]
+                    if (a ~ /^[A-Za-z0-9+\/=]+$/) {
+                        printf("%s\"%s\": {\"auth\": \"%s\", \"email\": \"\"}", (m++ ? ", " : "{"), h, a) > out
+                        written[h] = 1
+                    } else if (store != "" || (h in helper)) {
+                        if (!(h in said)) { said[h] = 1; left = left (left == "" ? "" : ", ") h }
+                    }
+                }
+                for (h in helper) if (!(h in written) && !(h in said) && h ~ /^[A-Za-z0-9.-]+(:[0-9]+)?$/) { said[h] = 1; left = left (left == "" ? "" : ", ") h }
+                if (m) printf("}\n") > out
+                print left
+            }'
+    )"
+    if [ -s "${CH}/ud/keystore.$$" ]; then
+        chmod 600 "${CH}/ud/keystore.$$" && mv "${CH}/ud/keystore.$$" "${CH}/ud/keystore"
+    fi
+    rm -f "${CH}/ud/keystore.$$"
+    [ -z "${_ks__left}" ] || printf "%s\\n" "cmdfound: udocker: your docker logins for ${_ks__left} are kept by a credential helper, which udocker cannot use; it pulls from there without them" >&2
+    return 0
+}
+
+_launcher() {
+    #$1 => launcher path, $2 => container id, $3 => program, $4 => what it is
+    _l__path="${1}"; _l__id="${2}"; _l__program="${3}"; _l__what="${4}"
+    {
+        printf "%s\\n" "#!/bin/sh"
+        printf "%s\\n" "#written by cmdfound: ${_l__what}"
+        printf 'ch="%s"; id="%s"; tool="%s"; program="%s"\n' "${CH}" "${_l__id}" "${tool}" "${_l__program}"
+        cat <<'LAUNCHER'
+#udocker is run by the path of its own maincmd.py, which finds its package
+#from it; after an update took that path away, by where tool/current leads
+[ -f "${tool}" ] || tool="$(readlink "${ch}/tool/current")"
+. "${ch}/lib/confined-launch" || exit 127
+_launch_sets || exit 127
+
+#CMDFOUND_UDOCKER_FLAGS, read on every run, is the user's own words for
+#udocker run, written as the shell writes words: '...' keeps all, "..." all
+#but \" \\ \$ \` and a backslash before a newline, and a backslash outside
+#them the next character. Nothing in it is expanded - a $, a backquote, a * is
+#that character - and it is never evaluated: confined-launch's split, the one
+#docker's launchers use too, reads it a character at a time, and each word
+#goes onto the arguments whole, so a word can hold any character, a control
+#character too. They go after the arguments cmdfound gives udocker run and
+#before the container, so a flag given twice is the user's. A quote left open
+#runs nothing.
+#
+#What a flag of the user's can break: --user or -u, the ids files are written
+#with; --containerauth, the names of those ids; -w, where the program starts;
+#--novol, HOME or the working directory unmounted; --hostenv, this machine's
+#PATH and libraries inside; --bindhome, --nometa and --entrypoint, what runs;
+#--location, a container outside this channel, which a purge cannot remove;
+#--rm, this placement's container deleted when the program ends; --pull and
+#--platform, a pull on a run; --nosysdirs, no /dev, /proc or /sys. docker run
+#flags udocker has nothing for: --network, --memory, --cpus (--cpuset-cpus
+#only), --cap-add, --cap-drop, --privileged, --read-only, --tmpfs, --mount,
+#--add-host, --group-add, --init, -d, --restart, --gpus, --security-opt and
+#--ulimit. -i and -t are taken and do nothing, --device works in execution
+#mode R1 only, and -p, in P1, only moves a port the program binds: there is
+#no network of the container's own
+
+#udocker run's arguments, made here and nowhere else: the container and the
+#program before the program's own arguments, the user's flags before them,
+#and what confined-launch gives udocker run first. Every variable changed
+#below for udocker's own process is handed to the program with the user's
+#value, or not at all when the user had none: udocker reads -e NAME from its
+#own environment. Everything goes before the program's arguments, the user's
+#words one set each, the last first, so no set costs more than the arguments
+#are many
+_launch_flags_read "${CMDFOUND_UDOCKER_FLAGS}"
+_launch_flags_closed udocker || exit 127
+set -- "${id}" "${program}" "$@"
+while _launch_prev_flag; do
+    set -- "${_launch_flag}" "$@"
+done
+eval "set -- $(_launch_udocker HOME XDG_CONFIG_HOME CURL_HOME PROOT_TMP_DIR UDOCKER_DIR UDOCKER_KEYSTORE UDOCKER_TMP UDOCKER_TARBALL UDOCKER_BIN UDOCKER_LIB UDOCKER_DOC UDOCKER_REPOS UDOCKER_LAYERS UDOCKER_CONTAINERS) \"\$@\""
+if [ X"${_launch_uid}" = X"0" ]; then set -- --allow-root --quiet run --nobanner "$@"; else set -- --quiet run --nobanner "$@"; fi
+
+unset CURL_HOME PROOT_TMP_DIR UDOCKER_BIN UDOCKER_LIB UDOCKER_DOC UDOCKER_REPOS UDOCKER_LAYERS UDOCKER_CONTAINERS
+PATH="${ch}/needs:${PATH}"; HOME="${ch}/home"; XDG_CONFIG_HOME="${ch}/home/.config"; UDOCKER_DIR="${ch}/ud"
+UDOCKER_KEYSTORE="${ch}/ud/keystore"; UDOCKER_TMP="${ch}/tmp"; XDG_RUNTIME_DIR="${ch}/xdg"; UDOCKER_TARBALL=""
+export PATH HOME XDG_CONFIG_HOME UDOCKER_DIR UDOCKER_KEYSTORE UDOCKER_TMP XDG_RUNTIME_DIR UDOCKER_TARBALL
+
+#not exec: udocker ends a Ctrl-C with 1, as a program that failed does, and
+#the shell stays in the foreground to say which it was. udocker kills proot a
+#quarter of a second after a Ctrl-C when the program goes on, and proot then
+#leaves the directories it made in the container to mount on, empty and with
+#no permissions: they go, or du stops at them, and a placement's size with it
+trap "interrupted=1" INT
+python3 -E -s "${tool}" "$@"
+status="${?}"
+if [ -n "${interrupted}" ]; then
+    find "${ch}/ud/containers/${id}/ROOT" -type d -perm 000 -exec rmdir {} + 2>/dev/null
+    exit 130
+fi
+exit "${status}"
+LAUNCHER
+    } | _util_write_aside "${_l__path}" 755
+}
+
+_undo() {
+    #obtain's EXIT trap: removes the container an unfinished obtain made
+    [ -n "${made}" ] || return 0
+    _util_removable "${CH}/ud/containers/${made}"
+    rm -rf "${CH}/ud/containers/${made}"
+}
+
+_meta() {
+    printf "%s\\n" "kind=runtime" "confines=yes" "manager=${SELF_NAME}:${TOOL_NAME}" "needs=python3" "reclaims=yes"
+    exit 0
+}
+
+_probe() {
+    #$1 => udocker or catalog/package, $2 => a version
+    name="${1}"; ver="${2}"
+    if [ X"${name}" = X"${TOOL_NAME}" ]; then
+        _sdist "${ver}"
+        case "${?}" in
+            0) ;;
+            1) exit 1 ;;
+            *) _api_answer_unreachable "PyPI could not be asked for udocker at ${PYPI}" ;;
+        esac
+        printf "version=%s\\n" "${sdist_version}"
+        [ -n "${sdist_bytes}" ] && printf "bytes=%s\\n" "${sdist_bytes}"
+        if [ -n "${sdist_sha256}" ]; then
+            printf "badge=%s\\n" "verified"
+        else
+            printf "badge=%s\\n" "none"
+        fi
+        exit 0
+    fi
+    _util_has_word "${CMDFOUND_NO_MANAGER}" "${SELF_NAME}" && \
+        _api_answer_unreachable "udocker itself could not be had"
+    if ! _image_spec "${CMDFOUND_IMAGE}"; then
+        _api_answer_unreachable "udocker cannot name the image ${CMDFOUND_IMAGE}"
+    fi
+    printf "%s\\n" "run_ms=250" "requires=${SELF_NAME}:${TOOL_NAME}"
+    tool=""
+    [ -x "${CH}/tool/current" ] && { _tool_real "${CH}/tool/current" || tool=""; }
+    _engines
+    if _engines_due; then
+        _engines_bytes
+        printf "once=setup|udocker-englib-%s|%s|none\\n" "${engines_release}" "${engines_bytes:--}"
+    fi
+    if ! _placed "${name}" "${ver}" && ! _image_here; then
+        printf "once=image|%s|%s|via udocker\\n" "${image_label}" "${CMDFOUND_IMAGE_BYTES:--}"
+    fi
+    exit 0
+}
+
+_locate() {
+    #$1 => udocker, $2 => a version
+    name="${1}"; ver="${2}"
+    [ X"${name}" = X"${TOOL_NAME}" ] && [ -n "${ver}" ] || exit 1
+    _sdist "${ver}"
+    case "${?}" in
+        0) ;;
+        1) exit 1 ;;
+        *) _api_answer_unreachable "PyPI could not be asked for udocker at ${PYPI}" ;;
+    esac
+    printf "url=%s\\n" "${sdist_url}"
+    printf "%s\\n" "format=tar.gz" "bin=maincmd.py"
+    [ -n "${sdist_sha256}" ] && printf "sha256=%s\\n" "${sdist_sha256}"
+    exit 0
+}
+
+_obtain() {
+    #$1 => catalog/package, $2 => a version
+    name="${1}"; ver="${2}"
+    _placement "${name}" "${ver}"
+    case "${?}" in
+        0) ;;
+        1) exit 1 ;;
+        *) _api_answer_failed "'${name}' '${ver}' is not a package and version this channel will install" ;;
+    esac
+    [ -n "${ver}" ] || exit 1
+    _api_value_in image "${CMDFOUND_RECIPE}"; image="${_api_value_in__out}"
+    _api_value_in install "${CMDFOUND_RECIPE}"; install="${_api_value_in__out}"
+    _api_value_in bin "${CMDFOUND_RECIPE}"; program="${_api_value_in__out}"
+    if [ -z "${image}" ] || [ -z "${install}" ] || [ -z "${program}" ]; then
+        _api_answer_failed "the catalog gave no recipe to install ${name} with"
+    fi
+    _api_is_program_name "${program}" || \
+        _api_answer_failed "'${program}' is not a program's name"
+    if ! _image_spec "${image}"; then
+        _api_answer_failed "udocker cannot name the image ${image}"
+    fi
+    if [ ! -x "${CMDFOUND_REQUIRED}" ] || ! _tool_real "${CMDFOUND_REQUIRED}"; then
+        _api_answer_unreachable "udocker is not here to install ${name} with"
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        _api_answer_unreachable "python3 is not here to run udocker with"
+    fi
+    if _api_is_unsafe "${CH}" || _api_is_unsafe "${tool}"; then
+        _api_answer_failed "a path here cannot be written into a launcher safely"
+    fi
+    allow_root=""
+    [ X"$(id -u)" = X"0" ] && allow_root="1"
+    _util_mkdir_p "${CH}/log" && _util_mkdir_p "${CH}/lib" && _util_mkdir_p "${CH}/run/${name}/${ver}" && \
+        _util_mkdir_p "${CH}/containers/${catalog}/${package}" || exit 1
+    log="${CH}/log/${catalog}-${package}.log"
+    : > "${log}"
+    _util_write_aside "${CH}/lib/confined-launch" < "$(_api_launch_source)" 2>/dev/null && . "${CH}/lib/confined-launch" || {
+        _api_answer_failed "confined-launch, which launchers run by, could not be copied into ${CH}/lib"
+    }
+
+    made=""
+    _util_trap_exit '_undo'
+
+    if _placed "${name}" "${ver}"; then
+        id="${placed_id}"
+    else
+        _engines
+        if _engines_due; then
+            _engines_bytes
+            t0="$(_util_now_ms)"
+            if ! _api_shown "${log}" _run_tool setup install || _engines_due; then
+                _api_answer_failed "udocker could not set up its engines$(_api_log_hint "${log}")"
+            fi
+            printf "timing=setup:%s:%s\\n" "${engines_bytes:--}" "$(( $(_util_now_ms) - t0 ))"
+        fi
+
+        if ! _image_here; then
+            t0="$(_util_now_ms)"
+            _keystore
+            _api_shown "${log}" _run_tool none pull "${image_spec}"; rc="${?}"
+            rm -f "${CH}/ud/keystore"
+            if [ "${rc}" -ne "0" ] || [ ! -f "${CH}/ud/repos/${image_repo}/${image_tag}/TAG" ]; then
+                hint=""
+                case "${image_repo}" in
+                    docker.io/*) command -v docker >/dev/null 2>&1 && \
+                        hint="; Docker Hub allows 100 pulls an hour without a login, and docker:${name} pulls with yours" ;;
+                esac
+                _api_answer_failed "udocker could not pull ${image_label}$(_api_log_hint "${log}")${hint}"
+            fi
+            _util_mkdir_p "${CH}/pulled/${image_repo}" && _util_mkdir_p "${CH}/cache" && \
+                printf "%s\\n" "${image_spec}" > "${CH}/cache/pulled.$$" && \
+                mv "${CH}/cache/pulled.$$" "${CH}/pulled/${image_repo}/${image_tag}" || \
+                rm -f "${CH}/cache/pulled.$$"
+            ibytes="$(_util_json 3 containers < "${CH}/ud/repos/${image_repo}/${image_tag}/manifest" 2>/dev/null | awk -F'\t' '
+                { n = split($1, p, "/") }
+                n == 3 && p[1] == "layers" && p[3] == "size" && $2 ~ /^[0-9]+$/ { t += $2; k++ }
+                END { if (k) printf("%.0f\n", t) }')"
+            printf "timing=image:%s:%s\\n" "${ibytes:--}" "$(( $(_util_now_ms) - t0 ))"
+        fi
+
+        t0="$(_util_now_ms)"
+        id="$(_run_tool none create "${image_spec}" 2>>"${log}" </dev/null | awk '/^[a-z0-9]+-[a-z0-9]+-[a-z0-9]+-[a-z0-9]+-[a-z0-9]+$/ {id = $0} END {print id}')"
+        if [ -z "${id}" ] || [ ! -d "${CH}/ud/containers/${id}/ROOT" ]; then
+            _api_answer_failed "udocker could not make a container of ${image_label}, its account is in ${log}"
+        fi
+        made="${id}"
+        if ! _run_tool none setup --execmode=P1 "${id}" >> "${log}" 2>&1 </dev/null; then
+            _api_answer_failed "udocker could not set container ${id} to run with proot, its account is in ${log}"
+        fi
+        eval "set -- $(_build_network)"
+        ca="${1}"; shift
+        if [ -n "${ca}" ]; then
+            _util_mkdir_p "${CH}/ud/containers/${id}/ROOT${CONFINED_CA%/*}" && \
+                cp "${ca}" "${CH}/ud/containers/${id}/ROOT${CONFINED_CA}" || \
+                _api_answer_failed "the CA file ${ca} could not be copied into the container"
+        fi
+        _api_shown "${log}" _run_tool none run --nobanner --user=root "${@}" "${id}" /bin/sh -c "${install}"; rc="${?}"
+        [ -z "${ca}" ] || rm -rf "${CH}/ud/containers/${id}/ROOT${CONFINED_CA%/*}"
+        _util_removable "${CH}/ud/containers/${id}"
+        if [ "${rc}" -ne "0" ]; then
+            _api_answer_failed "${name} ${ver} could not be installed in ${image_label}$(_api_log_hint "${log}")"
+        fi
+        if _util_is_number "${CMDFOUND_BYTES}"; then ibytes="${CMDFOUND_BYTES}"; else ibytes="-"; fi
+        printf "timing=install:%s:%s\\n" "${ibytes}" "$(( $(_util_now_ms) - t0 ))"
+    fi
+
+    #-w /: else udocker may start in the user's home, which is not in the image
+    t0="$(_util_now_ms)"
+    if ! _run_tool none --quiet run --nobanner --hostauth "--user=$(id -u)" -w / "${id}" /bin/sh -c 'command -v "$1"' sh "${program}" >/dev/null 2>>"${log}" </dev/null; then
+        _api_answer_failed "${name} ${ver} installed no program called ${program} that udocker could start, its account is in ${log}"
+    fi
+    printf "timing=run:-:%s\\n" "$(( $(_util_now_ms) - t0 ))"
+    if [ -n "${made}" ]; then
+        printf "%s\\t%s\\n" "${id}" "${image_spec}" | _util_write_aside "${CH}/containers/${name}/${ver}" || exit 1
+        made=""
+    fi
+    if ! _launcher "${CH}/run/${name}/${ver}/${program}" "${id}" "${program}" \
+        "${program}, from ${catalog} ${package} ${ver}, run by udocker in container ${id}"; then
+        _api_answer_failed "the launcher of ${program} could not be written"
+    fi
+    printf "program=%s\\n" "${CH}/run/${name}/${ver}/${program}"
+    printf "asset=%s\\n" "${id}"
+    printf "member=%s\\n" "run/${name}/${ver}" "containers/${name}/${ver}" "ud/containers/${id}"
+    exit 0
+}
+
+_reclaim() {
+    if [ X"${CMDFOUND_RECLAIM}" = X"all" ]; then
+        _util_removable "${CH}/ud"
+        printf "freed=%s\\n" "0"
+        exit 0
+    fi
+    named="
+$(find "${CH}/containers" -type f -exec cat {} + 2>/dev/null)
+"
+    doomed="$(find "${CH}/pulled" -type f 2>/dev/null | while IFS= read -r record; do
+        IFS= read -r spec < "${record}" || [ -n "${spec}" ] || continue
+        case "${named}" in
+            *"	${spec}
+"*) continue ;;
+        esac
+        printf "%s\\n" "${record}"
+    done)"
+    [ -n "${doomed}" ] || { printf "freed=%s\\n" "0"; exit 0; }
+    if [ ! -x "${CMDFOUND_REQUIRED}" ] || ! _tool_real "${CMDFOUND_REQUIRED}"; then
+        _api_answer_unreachable "udocker is not here to give its images back with"
+    fi
+    allow_root=""
+    [ X"$(id -u)" = X"0" ] && allow_root="1"
+    before="$(du -sk "${CH}/ud/layers" 2>/dev/null | awk '{print $1}')"
+    while IFS= read -r record; do
+        IFS= read -r spec < "${record}"
+        rest="${record#"${CH}/pulled/"}"
+        if [ -f "${CH}/ud/repos/${rest}/TAG" ]; then
+            _run_tool none --quiet rmi "${spec}" </dev/null >/dev/null 2>&1 || continue
+        fi
+        rm -f "${record}"
+        dir="${record%/*}"
+        while [ X"${dir}" != X"${CH}/pulled" ] && rmdir "${dir}" 2>/dev/null; do
+            dir="${dir%/*}"
+        done
+    done <<EOF
+${doomed}
+EOF
+    after="$(du -sk "${CH}/ud/layers" 2>/dev/null | awk '{print $1}')"
+    #no freed= when du failed or the layers grew meanwhile
+    if _util_is_number "${before}" && _util_is_number "${after}" && [ "${before}" -ge "${after}" ]; then
+        printf "freed=%s\\n" "$(( (before - after) * 1024 ))"
+    fi
+    exit 0
+}
+
+case "${1}" in
+    meta)    _meta ;;
+    probe)   _probe "${2}" "${3}" ;;
+    locate)  _locate "${2}" "${3}" ;;
+    obtain)  _obtain "${2}" "${3}" ;;
+    reclaim) _reclaim ;;
+esac
+exit 1

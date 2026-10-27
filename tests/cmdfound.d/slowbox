@@ -1,0 +1,42 @@
+#!/bin/sh
+#a runtime that has the image already and takes nine tenths of a second to
+#start a program: less to fetch than fastbox, and slower every run after. It
+#is asked about a package only with an image to run it in, and says no to
+#everything else at once, so no other test ever waits on it. FAKE_BOX_DOWN,
+#FAKE_BOX_LOG and obtaining as in fastbox, with no image to fetch
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+
+case "${1}" in
+    meta)  printf "%s\n" "kind=runtime" "confines=yes" ;;
+    probe) [ -n "${CMDFOUND_IMAGE}" ] || exit 1
+           case "${2}" in */*) ;; *) exit 1 ;; esac
+           [ -z "${FAKE_BOX_LOG}" ] || \
+               printf "%s\n" "${SELF_NAME} ${2} ${3} ${CMDFOUND_IMAGE} ${CMDFOUND_IMAGE_BYTES:--}" >> "${FAKE_BOX_LOG}"
+           case " ${FAKE_BOX_DOWN} " in
+               *" ${SELF_NAME} "*) printf "%s\n" "unreachable=the fake daemon is down"; exit 2 ;;
+           esac
+           printf "%s\n" "run_ms=900" ;;
+    obtain)
+           case "${2}" in */*) ;; *) exit 1 ;; esac
+           bin=""; recipe=""
+           while IFS= read -r line; do
+               case "${line}" in bin=?*) bin="${line#bin=}" ;; esac
+               recipe="${recipe}${line};"
+           done <<RECIPE
+${CMDFOUND_RECIPE}
+RECIPE
+           [ -n "${bin}" ] || { printf "%s\n" "failed=no recipe to install ${2} with"; exit 1; }
+           [ -z "${FAKE_BOX_LOG}" ] || \
+               printf "%s\n" "${SELF_NAME} obtain ${2} ${3} ${4} required=${CMDFOUND_REQUIRED-unset} bytes=${CMDFOUND_BYTES-unset} path=${PATH%%:*} recipe=${recipe}" >> "${FAKE_BOX_LOG}"
+           run="run/${2}/${3}"; dir="${CMDFOUND_HOME}/channels/${SELF_NAME}/${run}"
+           mkdir -p "${dir}" && \
+               printf "%s\n" '#!/bin/sh' "printf \"%s\\n\" \"${bin} ran in ${SELF_NAME}\" \"\$@\"" > "${dir}/${bin}" && \
+               chmod 755 "${dir}/${bin}" || { printf "%s\n" "failed=no launcher could be written"; exit 1; }
+           printf "%s\n" "program=${dir}/${bin}" "asset=${SELF_NAME}-image" "member=${run}" \
+               "timing=install:${CMDFOUND_BYTES:--}:17" "timing=run:-:19" ;;
+    *) exit 1 ;;
+esac

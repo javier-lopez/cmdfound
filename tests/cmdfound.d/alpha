@@ -1,0 +1,36 @@
+#!/bin/sh
+#a channel that answers without a network, so that everything the resolver
+#does with an answer can be tested without depending on anybody's uptime
+
+_program() {
+    mkdir -p "${CMDFOUND_HOME}/tmp" 2>/dev/null
+    printf "%s\n" '#!/bin/sh' "#serves ${2}" \
+                  '[ X"${1}" = X"--cat" ] && { cat; exit 0; }' \
+                  '[ X"${1}" = X"--code" ] && exit "${2}"' \
+                  'printf "%s\n" "alpha"' \
+                  'for _a in "${@}"; do printf "%s\n" "${_a}"; done' \
+        > "${CMDFOUND_HOME}/tmp/alpha-${1}"
+    printf "%s\n" "${CMDFOUND_HOME}/tmp/alpha-${1}"
+}
+
+case "${1}" in
+    meta)   printf "%s\n" "aliases=a,alfa" "kind=artifact" "confines=no" "describes=self" ;;
+    probe)  [ X"${2}" = X"tiny" ] || [ X"${2}" = X"mixed" ] || exit 1
+            printf "%s\n" "version=1.0" "bytes=2000" "badge=none" ;;
+    locate) [ X"${2}" = X"tiny" ] || [ X"${2}" = X"mixed" ] || exit 1
+#where an install can be held, and where they are counted. locate is
+#asked once per install, so the lines in FAKE_ALPHA_LOG are the
+#installs; with FAKE_ALPHA_HOLD naming a file, this waits for that file
+#to appear before it answers, which is how two runs of one program are
+#made to overlap. After twenty seconds it answers anyway: a test that
+#never writes the file fails, and does not hang the suite
+            [ -z "${FAKE_ALPHA_LOG}" ] || printf "%s\n" "locate ${2} $$" >> "${FAKE_ALPHA_LOG}"
+            held="0"
+            while [ -n "${FAKE_ALPHA_HOLD}" ] && [ ! -f "${FAKE_ALPHA_HOLD}" ] && \
+                  [ "${held}" -lt "400" ]; do
+                sleep 0.05; held="$((held + 1))"
+            done
+            printf "url=%s\n" "$(_program "${2}")"
+            printf "%s\n" "format=raw" "bin=tiny" ;;
+    *) exit 1 ;;
+esac

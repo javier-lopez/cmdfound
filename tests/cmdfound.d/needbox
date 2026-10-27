@@ -1,0 +1,26 @@
+#!/bin/sh
+#a runtime that runs programs with srneed-helper, which this machine does not
+#have and lender serves, the way udocker runs them with python3. It has the
+#image, and is asked about a package only with an image to run it in, saying
+#no to everything else at once, so no other test ever waits on it.
+#FAKE_BOX_DOWN and FAKE_BOX_LOG as in fastbox
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+
+case "${1}" in
+    meta)  printf "%s\n" "kind=runtime" "confines=yes" "needs=srneed-helper" ;;
+    probe) [ -n "${CMDFOUND_IMAGE}" ] || exit 1
+           case "${2}" in */*) ;; *) exit 1 ;; esac
+           [ -z "${FAKE_BOX_LOG}" ] || \
+               printf "%s\n" "${SELF_NAME} ${2} ${3} ${CMDFOUND_IMAGE} ${CMDFOUND_IMAGE_BYTES:--}" >> "${FAKE_BOX_LOG}"
+           case " ${FAKE_BOX_DOWN} " in
+               *" ${SELF_NAME} "*) printf "%s\n" "unreachable=the fake daemon is down"; exit 2 ;;
+           esac
+           command -v srneed-helper >/dev/null 2>&1 || {
+               printf "%s\n" "unreachable=srneed-helper is not here to run programs with"; exit 2; }
+           printf "%s\n" "run_ms=500" ;;
+    *) exit 1 ;;
+esac

@@ -1,0 +1,708 @@
+#!/bin/sh
+#description: cmdfound channel - rust crates' prebuilt programs, asked for by name and installed by cargo-binstall
+#usage: binstall meta | binstall index | binstall search WORDS...
+#       binstall probe CRATE [VER] | binstall locate CRATE VER [PROGRAM]
+#       binstall obtain CRATE VER [PROGRAM]
+
+INDEX="${CMDFOUND_CRATES_INDEX:-https://index.crates.io}"
+DL="${CMDFOUND_CRATES_DL:-https://static.crates.io/crates}"
+QUICKINSTALL="${CMDFOUND_QUICKINSTALL:-https://github.com/cargo-bins/cargo-quickinstall/releases/download}"
+RELEASES="${CMDFOUND_BINSTALL_RELEASES:-https://github.com/cargo-bins/cargo-binstall/releases}"
+GITHUB="${CMDFOUND_BINSTALL_GITHUB:-https://github.com}"
+#github's api, asked only how many of its questions are left
+API="https://api.github.com"
+#CMDFOUND_CHANNEL_FILE and not $0: the resolver sources this, and $0 is its own
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+#all the channel has is under it, so one rm -rf removes the channel whole
+CH="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+TOOL_NAME="cargo-binstall"
+#how many of a crate's newest versions are tried before the answer is none:
+#QuickInstall builds a release some days after it is out, and not every one
+TRIES="5"
+
+#a cd that CDPATH sends somewhere prints where it went, into whatever reads it
+unset CDPATH
+
+_heads() {
+    #$1... => urls or paths, a line each
+    #    _heads https://x/build.tar.gz  =>  200 3600000
+    #    _heads https://x/missing.tgz   =>  404 -
+    #    _heads https://unreachable/    =>  000 -
+    for _hd__u in "${@}"; do
+        if _util_is_local "${_hd__u}"; then
+            _hd__n="$(_api_fetcher_head_size "${_hd__u}")"
+            if [ -n "${_hd__n}" ]; then
+                printf "200 %s\\n" "${_hd__n}"
+            else
+                printf "%s\\n" "404 -"
+            fi
+            continue
+        fi
+        _api_fetcher_head_in "${_hd__u}" content-length follow
+        _hd__n="-"
+        [ X"${_api_fetcher_head_in__code}" = X"200" ] && _util_is_number "${_api_fetcher_head_in__out}" && \
+            _hd__n="${_api_fetcher_head_in__out}"
+        printf "%s %s\\n" "${_api_fetcher_head_in__code:-000}" "${_hd__n}"
+    done
+}
+
+_platform() {
+    _util_machine_in
+    case "${_util_machine_in__os}/${_util_machine_in__cpu}" in
+        Linux/x86_64|Linux/amd64)  printf "%s\\n" "x86_64" ;;
+        Linux/aarch64|Linux/arm64) printf "%s\\n" "aarch64" ;;
+        *) return 1 ;;
+    esac
+}
+
+_targets() {
+    #    _targets  =>  x86_64-unknown-linux-musl
+    #                  x86_64-unknown-linux-gnu
+
+    #here too: _platform runs in a $( ), a subshell that inherits it
+    _util_machine_in
+    if [ -n "${CARGO_BUILD_TARGET}" ]; then
+        printf "%s\\n" "${CARGO_BUILD_TARGET}" | tr ',' '\n' | awk 'NF'
+        return 0
+    fi
+    _tg__arch="$(_platform)" || return 1
+    printf "%s\\n" "${_tg__arch}-unknown-linux-musl"
+    getconf GNU_LIBC_VERSION >/dev/null 2>&1 && printf "%s\\n" "${_tg__arch}-unknown-linux-gnu"
+    return 0
+}
+
+_valid() {
+    #$1 => a crate's name, $2 => a version
+    #    _valid ripgrep 14.1.0  =>  0
+    #    _valid ripgrep ^14     =>  1
+    case "${1}" in
+        ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) return 1 ;;
+    esac
+    [ "${#1}" -le "64" ] || return 1
+    #a digit first, or cargo-binstall reads it as a range
+    case "${2}" in
+        '') ;;
+        [!0-9]*) return 1 ;;
+        *) _api_is_version "${2}" || return 1 ;;
+    esac
+    return 0
+}
+
+_index_path() {
+    #$1 => a crate's name, lower case
+    #    _index_path jq       =>  2/jq
+    #    _index_path syn      =>  3/s/syn
+    #    _index_path ripgrep  =>  ri/pg/ripgrep
+    case "${#1}" in
+        1) printf "1/%s\\n" "${1}" ;;
+        2) printf "2/%s\\n" "${1}" ;;
+        3) printf "3/%s/%s\\n" "${1%"${1#?}"}" "${1}" ;;
+        *) _ip__rest="${1#??}"
+           printf "%s/%s/%s\\n" "${1%"${1#??}"}" "${_ip__rest%"${_ip__rest#??}"}" "${1}" ;;
+    esac
+}
+
+_entries() {
+    #$1 => a crate's name, its index file left in entries; 2 when it could not be asked
+    #    _entries ripgrep    =>  0
+    #    _entries no-such-x  =>  1
+    _en__name="$(_util_lower "${1}")"
+    entries="${CH}/cache/index/${_en__name}"
+    _api_is_fresh "${entries}" && return 0
+    _util_mkdir_p "${entries%/*}" || return 2
+    _api_fetcher_answered "${INDEX}/$(_index_path "${_en__name}")" "${entries}.$$"
+    case "${?}" in
+        0) mv "${entries}.$$" "${entries}" && return 0
+           return 2 ;;
+        1) rm -f "${entries}"; return 1 ;;
+    esac
+    #yesterday's versions still exist
+    [ -s "${entries}" ] && return 0
+    return 2
+}
+
+_versions() {
+    #$1 => a crate's index file, $2 => a version. None yanked
+    #    _versions "${entries}"         =>  14.1.1
+    #                                       14.1.0
+    #    _versions "${entries}" 14.1.0  =>  14.1.0
+
+    #a pattern, not _util_json: no other key holds "vers" or "yanked"
+    awk -v want="${2}" '
+        {
+            v = ""; y = ""
+            if (match($0, /"vers":"[^"]*"/)) v = substr($0, RSTART + 8, RLENGTH - 9)
+            if (match($0, /"yanked":(true|false)/)) y = substr($0, RSTART + 9, RLENGTH - 9)
+            if (v == "" || y != "false") next
+            if (want != "") { if (v == want) print "0\t" v; next }
+            #three numbers and nothing else, which leaves out a prerelease
+            core = v; sub(/\+.*$/, "", core)
+            if (split(core, p, ".") != 3) next
+            if (p[1] !~ /^[0-9]+$/ || p[2] !~ /^[0-9]+$/ || p[3] !~ /^[0-9]+$/) next
+            printf("%012d%012d%012d\t%s\n", p[1], p[2], p[3], v)
+        }' "${1}" | LC_ALL=C sort -r | awk -F'\t' '!seen[$2]++ {print $2}'
+}
+
+_name_of() {
+    #$1 => a crate's index file. The name it was published under
+    #    _name_of "${entries}"  =>  fd-find
+    awk 'match($0, /^\{"name":"[^"]*"/) {print substr($0, 10, RLENGTH - 10); exit}' "${1}"
+}
+
+_build() {
+    #$1 => crate, $2 => version. bytes counts build, .sig and .crate; 2 leaves why
+    #    _build hyperfine 1.20.0  =>  0, target x86_64-unknown-linux-musl, bytes 1834000
+    #    _build no-builds 1.0.0   =>  1
+
+    #a build found is kept: an earlier target built later is not asked (owner, 2026-10-19)
+    _bd__crate="${1}"; _bd__version="${2}"
+    why=""; target=""; bytes=""
+    _bd__urls=""; _bd__base="${QUICKINSTALL}/${_bd__crate}-${_bd__version}/${_bd__crate}-${_bd__version}"
+    for _bd__t in $(_targets); do
+        _bd__kept="${CH}/cache/builds/${_bd__crate}/${_bd__version}/${_bd__t}"
+        if [ -s "${_bd__kept}" ]; then
+            IFS= read -r bytes < "${_bd__kept}"
+            if _util_is_number "${bytes}"; then
+                target="${_bd__t}"; return 0
+            fi
+        fi
+        _bd__urls="${_bd__urls} ${_bd__base}-${_bd__t}.tar.gz"
+    done
+    _bd__answers="$(_heads ${_bd__urls})"
+    for _bd__t in $(_targets); do
+        _bd__answer="$(printf "%s\\n" "${_bd__answers}" | awk 'NR == 1')"
+        _bd__answers="$(printf "%s\\n" "${_bd__answers}" | awk 'NR > 1')"
+        case "${_bd__answer%% *}" in
+            200) ;;
+            404|410) continue ;;
+            *) why="QuickInstall could not be asked whether it built ${_bd__crate} ${_bd__version} for ${_bd__t}"
+               return 2 ;;
+        esac
+        _bd__url="${_bd__base}-${_bd__t}.tar.gz"
+        _bd__build="${_bd__answer#* }"
+        _bd__sig="$(_heads "${_bd__url}.sig")"
+        _bd__dl="$(_heads "${DL}/${_bd__crate}/${_bd__crate}-${_bd__version}.crate")"
+        case "${_bd__sig%% *}/${_bd__dl%% *}" in
+            200/200) ;;
+            404/*|410/*) continue ;;
+            *) why="QuickInstall and crates.io could not be asked what ${_bd__crate} ${_bd__version} weighs"
+               return 2 ;;
+        esac
+        case "${_bd__build}/${_bd__sig#* }/${_bd__dl#* }" in
+            */-/*|*/-|-/*) why="QuickInstall or crates.io did not say what ${_bd__crate} ${_bd__version} weighs"
+                           return 2 ;;
+        esac
+        target="${_bd__t}"; bytes="$((${_bd__build} + ${_bd__sig#* } + ${_bd__dl#* }))"
+        _bd__kept="${CH}/cache/builds/${_bd__crate}/${_bd__version}/${_bd__t}"
+        _util_mkdir_p "${_bd__kept%/*}" && printf "%s\\n" "${bytes}" > "${_bd__kept}"
+        return 0
+    done
+    return 1
+}
+
+_manifest() {
+    #$1 => crate, $2 => version. Leaves repo, program, pkgurl, subdir, signed
+    #    _manifest fd-find 10.5.0  =>  0, repo sharkdp/fd, program fd
+    _mf__crate="${1}"; _mf__version="${2}"
+    repo=""; program=""; pkgurl=""; subdir=""; signed=""
+    _mf__kept="${CH}/cache/manifests/${_mf__crate}/${_mf__version}"
+    if [ ! -f "${_mf__kept}" ]; then
+        _util_mkdir_p "${_mf__kept%/*}" || return 2
+        _mf__url="${DL}/${_mf__crate}/${_mf__crate}-${_mf__version}.crate"; _mf__part="${_mf__kept}.$$"
+        _mf__one=""
+        TAR_OPTIONS= tar --version 2>/dev/null | grep 'GNU tar' >/dev/null && _mf__one="--occurrence=1"
+        { _api_fetcher "${_mf__url}" 2>/dev/null; printf "%s\\n" "${?}" > "${_mf__part}.rc"; } | \
+            TAR_OPTIONS= GZIP= gzip -dc 2>/dev/null | \
+            TAR_OPTIONS= tar -xOf - ${_mf__one} "${_mf__crate}-${_mf__version}/Cargo.toml" > "${_mf__part}" 2>/dev/null
+        _mf__rc=""; IFS= read -r _mf__rc < "${_mf__part}.rc"
+        rm -f "${_mf__part}.rc"
+        #a download cut short once Cargo.toml is out still counts
+        if [ ! -s "${_mf__part}" ]; then
+            rm -f "${_mf__part}"
+            if [ X"${_mf__rc}" = X"0" ]; then
+                : > "${_mf__part}"
+            else
+                case "$(_heads "${_mf__url}")" in
+                    404*|410*) return 1 ;;
+                    *) return 2 ;;
+                esac
+            fi
+        fi
+        awk '
+            function value(l) { sub(/^[^=]*=[ \t]*/, "", l); sub(/[ \t]*$/, "", l); gsub(/^["\047]|["\047]$/, "", l); return l }
+            /^[ \t]*\[/ { t = $0; gsub(/[ \t]/, "", t); next }
+            t == "[package]" && /^[ \t]*repository[ \t]*=/ { r = value($0) }
+            t == "[[bin]]" && /^[ \t]*name[ \t]*=/ { n++; b = value($0) }
+            t == "[package.metadata.binstall]" && /^[ \t]*pkg-url[ \t]*=/ { u = 1 }
+            t == "[package.metadata.binstall.signing]" || (t == "[package.metadata.binstall]" && /^[ \t]*signing[ \t]*=/) { g = 1 }
+            END {
+                if (match(r, /^https?:\/\/(www\.)?github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+/)) {
+                    rest = substr(r, RSTART + RLENGTH)
+                    r = substr(r, RSTART, RLENGTH); sub(/^https?:\/\/(www\.)?github\.com\//, "", r); sub(/\.git$/, "", r)
+                    print "repo=" r
+                    sub(/^\/+$/, "", rest)
+                    if (rest != "") print "subdir=1"
+                }
+                if (n == 1) print "program=" b
+                if (u) print "pkgurl=1"
+                if (g) print "signed=1"
+            }' "${_mf__part}" > "${_mf__part}.read" && mv "${_mf__part}.read" "${_mf__kept}"
+        rm -f "${_mf__part}" "${_mf__part}.read"
+    fi
+    repo="$(awk -F= '$1 == "repo" {print $2; exit}' "${_mf__kept}")"
+    program="$(awk -F= '$1 == "program" {print $2; exit}' "${_mf__kept}")"
+    pkgurl="$(awk -F= '$1 == "pkgurl" {print $2; exit}' "${_mf__kept}")"
+    subdir="$(awk -F= '$1 == "subdir" {print $2; exit}' "${_mf__kept}")"
+    signed="$(awk -F= '$1 == "signed" {print $2; exit}' "${_mf__kept}")"
+    return 0
+}
+
+_quota() {
+    #$1 => questions installing asks github's api, $2 => what, and from where
+    #    _quota 2 "fd-find 10.5.0 from QuickInstall"   =>  0  enough left, or no answer
+    #    _quota 99 "fd-find 10.5.0 from QuickInstall"  =>  1  why says how many are
+    _qt__asks="${1}"; _qt__what="${2}"
+    why=""
+    _api_fetcher_bin || return 0
+    _api_github_token_in; _qt__token="${_api_github_token_in__out}"
+    #wget is sent no token, so it would be told about another quota
+    [ -n "${_qt__token}" ] && [ X"${g_fetcher_bin}" != X"curl" ] && return 0
+    #with a token cargo-binstall asks through graphql
+    _qt__quota="rate"; [ -n "${_qt__token}" ] && _qt__quota="graphql"
+    _util_mkdir_p "${CH}/tmp" || return 0
+    _qt__f="${CH}/tmp/rate_limit.$$"
+    _api_fetcher_github_in "${API}/rate_limit" "${_qt__f}"
+    _qt__rate=""
+    [ X"${_api_fetcher_github_in__out}" = X"200" ] && _qt__rate="$(tr -d ' \t\r\n' < "${_qt__f}" | awk -v q="${_qt__quota}" '
+            {
+                if (!match($0, "\"" q "\":\\{[^}]*\\}")) exit
+                r = substr($0, RSTART, RLENGTH)
+                if (match(r, /"limit":[0-9]+/)) limit = substr(r, RSTART + 8, RLENGTH - 8)
+                if (match(r, /"remaining":[0-9]+/)) left = substr(r, RSTART + 12, RLENGTH - 12)
+                if (match(r, /"reset":[0-9]+/)) reset = substr(r, RSTART + 8, RLENGTH - 8)
+            }
+            END { if (limit != "" && left != "" && reset != "") print left, limit, reset }')"
+    rm -f "${_qt__f}"
+    [ -n "${_qt__rate}" ] || return 0
+    _qt__left="${_qt__rate%% *}"; _qt__reset="${_qt__rate##* }"
+    _qt__limit="${_qt__rate#* }"; _qt__limit="${_qt__limit%% *}"
+    [ "${_qt__left}" -ge "${_qt__asks}" ] && return 0
+    _qt__minutes="$(( (${_qt__reset} - $(date +%s) + 59) / 60 ))"
+    [ "${_qt__minutes}" -ge "1" ] || _qt__minutes="1"
+    if [ -n "${_qt__token}" ]; then
+        why="github's api has ${_qt__left} of its questions left for the exported token, for about ${_qt__minutes} more minutes, and cargo-binstall asks it ${_qt__asks} to install ${_qt__what}"
+    else
+        why="github's api has ${_qt__left} of the ${_qt__limit} questions an hour it allows this address left, for about ${_qt__minutes} more minutes, and cargo-binstall asks it ${_qt__asks} to install ${_qt__what}; exporting GITHUB_TOKEN or GH_TOKEN raises the limit to 5000 an hour"
+    fi
+    return 1
+}
+
+_matching() {
+    #$1 => a release's page, $2 => tag, $3 => version, $4 => names, $5 => targets
+    #    _matching "${page}" v10.5.0 10.5.0 "fd-find fd" "${t}"  =>  fd-v10.5.0-x86_64-unknown-linux-musl.tar.gz
+
+    #the patterns are cargo-binstall 1.23.0's own
+    _ma__page="${1}"; _ma__tag="${2}"; _ma__ver="${3}"; _ma__names="${4}"; _ma__targets="${5}"
+    awk -v tag="${_ma__tag}" -v ver="${_ma__ver}" -v names="${_ma__names}" -v targets="${_ma__targets}" '
+        {
+            s = $0
+            while (match(s, /releases\/download\/[^"\/]+\/[^"\/]+"/)) {
+                f = substr(s, RSTART + 18, RLENGTH - 19); s = substr(s, RSTART + RLENGTH)
+                if (substr(f, 1, length(tag) + 1) == tag "/") files[substr(f, length(tag) + 2)] = 1
+            }
+        }
+        END {
+            nt = split(targets, t, " "); nn = split(names, n, " ")
+            ns = split(".tar .tbz2 .tar.bz2 .tbz .tar.bz .tgz .tar.gz .txz .tar.xz .tzstd .tzst .tar.zst .zip .bin", x, " ")
+            x[++ns] = ""
+            for (i = 1; i <= nt; i++) for (j = 1; j <= nn; j++) {
+                a = n[j]; g = t[i]; v = ver
+                k = 0
+                p[++k] = a "-" g "-v" v; p[++k] = a "-" g "-" v; p[++k] = a "-" v "-" g; p[++k] = a "-v" v "-" g
+                p[++k] = a "_" g "_v" v; p[++k] = a "_" g "_" v; p[++k] = a "_" v "_" g; p[++k] = a "_v" v "_" g
+                p[++k] = a "-" g; p[++k] = a "_" g
+                for (m = 1; m <= k; m++) for (e = 1; e <= ns; e++) if ((p[m] x[e]) in files) { print p[m] x[e]; exit }
+            }
+        }' "${_ma__page}"
+}
+
+_author() {
+    #$1 => crate, $2 => version, $3 => the newest version when walking, else empty
+    #    _author fd-find 10.5.0 ""  =>  0, repo sharkdp/fd, tag v10.5.0, asset fd-v10.5.0-x86_64-unknown-linux-musl.tar.gz
+
+    #read from github's pages, never its api
+    _au__crate="${1}"; _au__version="${2}"; _au__newest="${3}"
+    why=""; tag=""; asset=""
+    _au__kept="${CH}/cache/authors/${_au__crate}/${_au__version}"
+    if [ -s "${_au__kept}" ]; then
+        read -r repo tag asset < "${_au__kept}"
+        [ -n "${asset}" ] && return 0
+    fi
+    _manifest "${_au__crate}" "${_au__newest:-${_au__version}}"
+    case "${?}" in
+        0) ;;
+        1) return 1 ;;
+        *) why="the crate ${_au__crate} ${_au__newest:-${_au__version}} could not be read from crates.io for the repository it names"; return 2 ;;
+    esac
+    [ -n "${repo}" ] || return 1
+    if [ -n "${_au__newest}" ]; then
+        _api_latest_tag_in "${GITHUB}/${repo}/releases" "${CH}/cache/releases/${repo}/latest"
+        case "${?}" in
+            0) ;;
+            1) return 1 ;;
+            *) why="github could not be asked for the newest release of ${repo}"; return 2 ;;
+        esac
+        _au__latest="${_api_latest_tag_in__out}"
+        case "${_au__latest}" in
+            "v${_au__version}"|"${_au__version}") set -- "${_au__latest}" ;;
+            *) return 1 ;;
+        esac
+    else
+        set -- "v${_au__version}" "${_au__version}"
+    fi
+    _au__names="${_au__crate}"
+    [ -n "${program}" ] && [ X"${program}" != X"${_au__crate}" ] && _au__names="${_au__crate} ${program}"
+    _au__page="${CH}/tmp/release.$$"
+    _util_mkdir_p "${CH}/tmp" || { why="${CH}/tmp could not be made"; return 2; }
+    for _au__tag in "${@}"; do
+        _api_fetcher_answered "${GITHUB}/${repo}/releases/expanded_assets/${_au__tag}" "${_au__page}"
+        case "${?}" in
+            0) ;;
+            1) continue ;;
+            *) rm -f "${_au__page}"
+               why="github could not be asked what the release ${_au__tag} of ${repo} has"; return 2 ;;
+        esac
+        asset="$(_matching "${_au__page}" "${_au__tag}" "${_au__version}" "${_au__names}" "$(_targets | tr '\n' ' ')")"
+        rm -f "${_au__page}"
+        if [ -n "${asset}" ]; then
+            tag="${_au__tag}"
+            _util_mkdir_p "${_au__kept%/*}" && printf "%s %s %s\\n" "${repo}" "${tag}" "${asset}" > "${_au__kept}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_path() {
+    #$1 => crate, $2 => version, $3 => the source probe chose, kept when given
+    #    _path hyperfine 1.20.0  =>  quickinstall x86_64-unknown-linux-musl
+    #    _path fd-find 10.5.0    =>  author sharkdp/fd v10.5.0
+    _pt__f="${CH}/cache/paths/${1}/${2}"
+    if [ -n "${3}" ]; then
+        _util_mkdir_p "${_pt__f%/*}" && printf "%s\\n" "${3}" > "${_pt__f}"
+        return 0
+    fi
+    [ -s "${_pt__f}" ] && cat "${_pt__f}"
+}
+
+_decided() {
+    #$1 => crate, $2 => version. The source probe chose, or chosen again as probe does
+    #    _decided fd-find 10.5.0  =>  0, source author, repo sharkdp/fd, tag v10.5.0
+    source=""
+    _dc__path="$(_path "${1}" "${2}")"; _dc__rest="${_dc__path#* }"
+    case "${_dc__path%% *}" in
+        quickinstall) source="quickinstall"; target="${_dc__rest}"; return 0 ;;
+        author) source="author"; repo="${_dc__rest%% *}"; tag="${_dc__rest#* }"; return 0 ;;
+    esac
+    _build "${1}" "${2}"
+    case "${?}" in
+        0) source="quickinstall"; _path "${1}" "${2}" "quickinstall ${target}"; return 0 ;;
+        2) return 2 ;;
+    esac
+    _author "${1}" "${2}" ""
+    case "${?}" in
+        0) source="author"; _path "${1}" "${2}" "author ${repo} ${tag}"; return 0 ;;
+        2) return 2 ;;
+    esac
+    return 1
+}
+
+_release_file() {
+    #$1 => a tag
+    #    _release_file v1.23.0  =>  ${RELEASES}/download/v1.23.0/cargo-binstall-x86_64-unknown-linux-musl.tgz
+    printf "%s\\n" "${RELEASES}/download/${1}/${TOOL_NAME}-$(_platform)-unknown-linux-musl.tgz"
+}
+
+_release_digest() {
+    #$1 => version. The sha256 github shows beside cargo-binstall's file
+    _rd__page="${CH}/tmp/assets.$$"
+    _util_mkdir_p "${CH}/tmp" || return 2
+    _api_fetcher_answered "${RELEASES}/expanded_assets/v${1}" "${_rd__page}"
+    case "${?}" in
+        0) ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
+    _rd__file="$(_release_file "v${1}")"
+    awk -v want="releases/download/v${1}/${_rd__file##*/}\"" '
+        {
+            s = $0
+            while (match(s, /releases\/download\/[^"]*"|sha256:[0-9a-f]+/)) {
+                t = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+                if (substr(t, 1, 7) != "sha256:") { here = (t == want); continue }
+                if (here && length(t) == 71) { print substr(t, 8); exit }
+            }
+        }' "${_rd__page}"
+    rm -f "${_rd__page}"
+}
+
+_run_tool() {
+    #$1... => cargo-binstall's arguments, run with the channel's HOME and CARGO_HOME
+    _util_mkdir_p "${CH}/cargo"
+    (
+        _api_tool_home
+        CARGO_HOME="${CH}/cargo"; CARGO_INSTALL_ROOT="${root}"
+        export CARGO_HOME CARGO_INSTALL_ROOT
+        exec "${tool}" "${@}" </dev/null
+    )
+}
+
+_programs() {
+    for _pg__p in "${1}"/bin/*; do
+        [ -f "${_pg__p}" ] && [ -x "${_pg__p}" ] && printf "%s\\n" "${_pg__p##*/}"
+    done
+}
+
+_installed() {
+    #$1 => a root, $2 => crate, $3 => version
+    #    _installed "${root}" fd-find 10.5.0  =>  0
+
+    #cargo's record is written last
+    grep -F "\"${2} ${3} (" "${1}/.crates.toml" >/dev/null 2>&1
+}
+
+_undo() {
+    #obtain's EXIT trap: removes an unfinished root
+    [ -n "${made}" ] || return 0
+    rm -rf "${made}"; rmdir "${made%/*}" 2>/dev/null
+}
+
+_meta() {
+    printf "%s\\n" "kind=artifact" "confines=no" "describes=self" "manager=${SELF_NAME}:${TOOL_NAME}"
+    exit 0
+}
+
+_probe() {
+    #$1 => a crate, $2 => a version when one was asked for
+    crate="${1}"; ver="${2}"
+    #a bare name is a command's, and nobody publishes which crate builds which
+    [ X"${CMDFOUND_NAMED}" = X"${SELF_NAME}" ] || exit 1
+    [ -z "${crate}" ] && exit 1
+    _valid "${crate}" "${ver}" || exit 1
+    _targets >/dev/null || exit 1
+    if [ X"${crate}" = X"${TOOL_NAME}" ]; then
+        _platform >/dev/null || exit 1
+        version="${ver}"
+        if [ -z "${version}" ]; then
+            version="$(_api_latest_release)" || {
+                _api_answer_unreachable "the newest cargo-binstall release could not be read from ${RELEASES}"
+            }
+        fi
+        sizef="${CH}/cache/${TOOL_NAME}-${version}-$(_platform).bytes"
+        if [ ! -s "${sizef}" ]; then
+            answer="$(_heads "$(_release_file "v${version}")")"
+            case "${answer%% *}" in
+                200) ;;
+                404|410) exit 1 ;;
+                *) printf "unreachable=%s\\n" "cargo-binstall ${version} could not be weighed at ${RELEASES}"
+                   exit 2 ;;
+            esac
+            if ! _util_is_number "${answer#* }"; then
+                _api_answer_unreachable "cargo-binstall ${version} could not be weighed at ${RELEASES}"
+            fi
+            _util_mkdir_p "${sizef%/*}" && printf "%s\\n" "${answer#* }" > "${sizef}"
+        fi
+        printf "version=%s\\n" "${version}"
+        IFS= read -r bytes < "${sizef}"; printf "bytes=%s\\n" "${bytes}"
+        exit 0
+    fi
+    _util_has_word "${CMDFOUND_NO_MANAGER}" "${SELF_NAME}" && exit 1
+
+    _entries "${crate}"
+    case "${?}" in
+        0) ;;
+        1) exit 1 ;;
+        *) _api_answer_unreachable "crates.io's index could not be asked about ${crate}" ;;
+    esac
+    name="$(_name_of "${entries}")"
+    [ -n "${name}" ] || name="${crate}"
+    _valid "${name}" "" || exit 1
+    versions="$(_versions "${entries}" "${ver}")"
+    newest=""
+    [ -z "${ver}" ] && newest="$(printf "%s\\n" "${versions}" | awk 'NR == 1')"
+    tries="0"
+    for version in ${versions}; do
+        [ "${tries}" -ge "${TRIES}" ] && break
+        tries="$((${tries} + 1))"
+        _build "${name}" "${version}"
+        case "${?}" in
+            0) _path "${name}" "${version}" "quickinstall ${target}"
+               printf "version=%s\\n" "${version}"
+               printf "bytes=%s\\n" "${bytes}"
+               printf "package=%s\\n" "${name}"
+               printf "badge=%s\\n" "via:${SELF_NAME}"
+               printf "requires=%s\\n" "${SELF_NAME}:${TOOL_NAME}"
+               exit 0 ;;
+            2) _api_answer_unreachable "${why}" ;;
+        esac
+        _author "${name}" "${version}" "${newest}"
+        case "${?}" in
+            #no bytes: cargo-binstall picks the file only as it installs
+            0) _path "${name}" "${version}" "author ${repo} ${tag}"
+               _manifest "${name}" "${newest:-${version}}" >/dev/null 2>&1 || signed=""
+               printf "version=%s\\n" "${version}"
+               printf "package=%s\\n" "${name}"
+               if [ -n "${signed}" ]; then
+                   printf "badge=%s\\n" "via:${SELF_NAME}"
+               else
+                   printf "badge=%s\\n" "none"
+               fi
+               printf "requires=%s\\n" "${SELF_NAME}:${TOOL_NAME}"
+               exit 0 ;;
+            2) _api_answer_unreachable "${why}" ;;
+        esac
+    done
+    exit 1
+}
+
+_locate() {
+    #$1 => a crate, $2 => a version, $3 => the program asked for
+    name="${1}"; ver="${2}"; want="${3}"
+    [ -z "${name}" ] || [ -z "${ver}" ] && exit 1
+    _valid "${name}" "${ver}" || exit 1
+    _targets >/dev/null || exit 1
+    if [ X"${name}" = X"${TOOL_NAME}" ]; then
+        _platform >/dev/null || exit 1
+        sum="$(_release_digest "${ver}")"
+        if ! _util_is_sha256 "${sum}"; then
+            _api_answer_unreachable "the sha256 github shows for cargo-binstall ${ver} could not be read from ${RELEASES}"
+        fi
+        printf "url=%s\\n" "$(_release_file "v${ver}")"
+        printf "%s\\n" "format=tar.gz" "bin=${TOOL_NAME}" "sha256=${sum}"
+        exit 0
+    fi
+    _decided "${name}" "${ver}"
+    case "${?}" in
+        0) ;;
+        1) exit 1 ;;
+        *) _api_answer_unreachable "${why}" ;;
+    esac
+    if [ X"${source}" = X"quickinstall" ]; then
+        printf "url=%s\\n" "${QUICKINSTALL}/${name}-${ver}/${name}-${ver}-${target}.tar.gz"
+    else
+        printf "url=%s\\n" "${GITHUB}/${repo}/releases/tag/${tag}"
+    fi
+    [ -n "${want}" ] && printf "bin=%s\\n" "${want}"
+    exit 0
+}
+
+_obtain() {
+    #$1 => a crate, $2 => a version, $3 => the program asked for, the crate's name when none
+    name="${1}"; ver="${2}"; want="${3:-${1}}"
+    [ -z "${name}" ] || [ -z "${ver}" ] && exit 1
+    if ! _valid "${name}" "${ver}"; then
+        _api_answer_failed "'${name}' '${ver}' is not a crate and version this channel will install"
+    fi
+    tool="${CMDFOUND_REQUIRED}"
+    if [ ! -x "${tool}" ]; then
+        _api_answer_unreachable "cargo-binstall is not available to install ${name}"
+    fi
+    _api_is_program_name "${want}" || \
+        _api_answer_failed "'${want}' is not a program's name"
+
+    root="${CH}/crates/${name}/${ver}"
+    made=""
+    _util_trap_exit '_undo'
+    if ! _installed "${root}" "${name}" "${ver}"; then
+        _decided "${name}" "${ver}"
+        case "${?}" in
+            0) ;;
+            1) _api_answer_failed "neither QuickInstall nor the author of ${name} has a build of ${ver} for this machine" ;;
+            *) _api_answer_unreachable "${why}" ;;
+        esac
+        made="${root}"
+        rm -rf "${root}"
+        _util_mkdir_p "${root}" && _util_mkdir_p "${CH}/log" || exit 1
+        log="${CH}/log/${name}.log"
+        #the questions cargo-binstall 1.23.0 asks github's api, counted through a proxy
+        if [ X"${source}" = X"quickinstall" ]; then
+            asks="1"; from="QuickInstall"
+        else
+            _ob__repo="${repo}"
+            _manifest "${name}" "${ver}" || { pkgurl=""; subdir=""; }
+            repo="${_ob__repo}"
+            asks="2"
+            [ -n "${subdir}" ] && asks="4"
+            [ -n "${pkgurl}" ] && asks="1"
+            _api_github_token_in && asks="$((${asks} + 1))"
+            from="the releases of ${repo}"
+        fi
+        if ! _quota "${asks}" "${name} ${ver} from ${from}"; then
+            _api_answer_unreachable "${why}"
+        fi
+        #one strategy only: given two, a failed signature falls through to the next
+        if [ X"${source}" = X"quickinstall" ]; then
+            set -- --strategies quick-install --only-signed --targets "${target}"
+            about="QuickInstall's build of ${name} ${ver}"
+        else
+            #one --targets each: cargo-binstall refuses a comma list
+            set -- --strategies crate-meta-data
+            for t in $(_targets); do set -- "${@}" --targets "${t}"; done
+            about="the releases of ${repo}"
+        fi
+        set -- --root "${root}" --no-confirm --disable-telemetry --no-discover-github-token "${@}" "${name}@${ver}"
+        if [ -t 2 ]; then
+            { _run_tool "${@}" 2>&1; printf "%s\\n" "${?}" > "${log}.rc"; } | tee "${log}" >&2
+        else
+            _run_tool "${@}" > "${log}" 2>&1
+            printf "%s\\n" "${?}" > "${log}.rc"
+        fi
+        rc=""; IFS= read -r rc 2>/dev/null < "${log}.rc"; rm -f "${log}.rc"
+        if [ X"${rc}" != X"0" ] || ! _installed "${root}" "${name}" "${ver}"; then
+            if grep 'api\.github\.com' "${log}" >/dev/null 2>&1; then
+                _api_answer_unreachable "cargo-binstall could not ask api.github.com about ${about}, which it does before it downloads; its account is in ${log}"
+            fi
+            _api_answer_failed "cargo-binstall could not install ${name} ${ver}; its account is in ${log}"
+        fi
+    fi
+
+    programs="$(_programs "${root}")"
+    _api_program_in "${programs}" "${want}" || _api_answer_failed "${name} ${why}"
+    program="${_api_program_in__out}"
+    made=""
+
+    printf "program=%s\\n" "${root}/bin/${program}"
+    _decided "${name}" "${ver}" >/dev/null 2>&1
+    if [ X"${source}" = X"author" ]; then
+        printf "asset=%s\\n" "${repo}@${tag}"
+    else
+        target="$(awk 'match($0, /"target":"[^"]*"/) {print substr($0, RSTART + 10, RLENGTH - 11); exit}' \
+            "${root}/binstall/crates-v1.json" 2>/dev/null)"
+        printf "asset=%s\\n" "${name}-${ver}-${target:-unknown}.tar.gz"
+    fi
+    printf "member=%s\\n" "crates/${name}/${ver}"
+    exit 0
+}
+
+case "${1}" in
+    meta)   _meta ;;
+
+    index)
+        #the sparse index is read a crate at a time, when that crate is asked
+        #for, so there is no catalog to keep
+        exit 1
+        ;;
+
+    search)
+        #and none to search: crates.io's search is its api, which asks every
+        #caller for a way to reach them
+        exit 0
+        ;;
+
+    probe)  _probe "${2}" "${3}" ;;
+    locate) _locate "${2}" "${3}" "${4}" ;;
+    obtain) _obtain "${2}" "${3}" "${4}" ;;
+
+    *) printf "%s\\n" "usage: ${SELF_NAME} meta|index|search|probe|locate|obtain" >&2; exit 1 ;;
+esac

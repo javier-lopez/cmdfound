@@ -1,0 +1,25 @@
+#!/bin/sh
+#a stand-in channel, for the cmdfound tests, that says what network it was
+#handed. Every call writes the proxy and certificate variables it sees, a line
+#each, to NETSPY_LOG. Its one package, x, is this same file, and run as the
+#program it prints that line to stdout: what the program sees has to be the
+#user's environment, not what the channels were given
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+
+_seen() {
+    printf "%s http_proxy=%s HTTP_PROXY=%s https_proxy=%s HTTPS_PROXY=%s no_proxy=%s NO_PROXY=%s SSL_CERT_FILE=%s CURL_CA_BUNDLE=%s SSL_CERT_DIR=%s\n" \
+        "${1}" "${http_proxy-unset}" "${HTTP_PROXY-unset}" "${https_proxy-unset}" "${HTTPS_PROXY-unset}" \
+        "${no_proxy-unset}" "${NO_PROXY-unset}" "${SSL_CERT_FILE-unset}" "${CURL_CA_BUNDLE-unset}" "${SSL_CERT_DIR-unset}"
+}
+
+case "${1}" in
+    meta)   printf "%s\n" "kind=artifact" ;;
+    index)  _seen index >> "${NETSPY_LOG}"; printf "%s\n" "packages=1" ;;
+    probe)  _seen probe >> "${NETSPY_LOG}"; printf "%s\n" "version=1.0" ;;
+    locate) _seen locate >> "${NETSPY_LOG}"; printf "url=%s\nformat=raw\nbin=x\n" "${SELF}" ;;
+    *)      _seen program ;;
+esac
+exit 0

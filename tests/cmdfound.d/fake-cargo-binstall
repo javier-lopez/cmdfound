@@ -1,0 +1,209 @@
+#!/bin/sh
+#a stand-in for cargo-binstall, for the cmdfound tests. It does what the
+#binstall channel asks of cargo-binstall and nothing else, from what is on disk
+#instead of github:
+#
+#  FAKE_BINSTALL_QUICKINSTALL/CRATE-VERSION/CRATE-VERSION-TARGET.tar.gz
+#      a QuickInstall build, holding its programs at the top, with its
+#      signature beside it in .sig, which here is the build's sha256
+#  FAKE_BINSTALL_CRATES/CRATE/CRATE-VERSION.crate
+#      the crate, whose Cargo.toml names its repository, its programs, and
+#      whether its author signs releases
+#  FAKE_BINSTALL_GITHUB/OWNER/REPO/releases/download/TAG/FILE.tar.gz
+#      a release of the author's, with a .sig beside a file that is signed
+#
+#  -V
+#      prints its version, FAKE_BINSTALL_VERSION or 9.9.9
+#  [OPTION]... CRATE@VERSION
+#      installs, the way cargo-binstall does. The settings file goes in
+#      CARGO_HOME, or ~/.cargo without one. A token is taken from GITHUB_TOKEN
+#      or GH_TOKEN, or looked for in ~/.git-credentials unless told not to.
+#      --targets is given once for each target, and a value with a comma in it
+#      is refused, as cargo-binstall 1.23.0 refuses it.
+#
+#      The strategies are tried in the order given, and one that fails for any
+#      reason hands over to the next, as cargo-binstall's do:
+#      quick-install takes the first target QuickInstall built, and refuses a
+#      signature that does not match, or a missing one under --only-signed;
+#      crate-meta-data takes the first file of the author's release tagged
+#      vVERSION or VERSION that is named CRATE or the crate's only program,
+#      then -, then the target, with or without the version, for the first
+#      target that has one, and checks its signature when the crate says its
+#      releases are signed; compile compiles. With none left, nothing is
+#      installed. The programs go to ROOT/bin, through a temporary directory in
+#      ROOT, and the records to ROOT/.crates.toml and
+#      ROOT/binstall/crates-v1.json.
+#
+#      An option beats the variable that stands for it - BINSTALL_STRATEGIES,
+#      CARGO_BUILD_TARGET, CARGO_INSTALL_ROOT, BINSTALL_DISABLE_TELEMETRY and
+#      BINSTALL_NO_DISCOVER_GITHUB_TOKEN - and BINSTALL_DISABLE_STRATEGIES takes
+#      its strategies out of whatever list is left, as cargo-binstall 1.23.0
+#      was seen to do
+#
+#FAKE_BINSTALL_API_DOWN=1 fails every strategy that asks api.github.com the way
+#cargo-binstall does when it cannot be asked, and FAKE_BINSTALL_RATE_LIMITED=1 the
+#way 1.23.0 does when the hour's questions are used up: it waits on the refusal
+#until each fetcher's resolution times out, and says it found nothing. FAKE_BINSTALL_LOG, when set,
+#records each install: what was asked, what it was told, and the HOME,
+#CARGO_HOME and TMPDIR it saw; on a line of its own every BINSTALL_ and CARGO_
+#variable it was handed; and where what it installed came from
+
+root="${CARGO_INSTALL_ROOT}"; targets=""; envtargets="${CARGO_BUILD_TARGET}"
+strategies="${BINSTALL_STRATEGIES:-crate-meta-data,quick-install,compile}"
+signed="if-any"; telemetry="on"; discover="yes"; confirm="yes"; spec=""
+[ X"${BINSTALL_DISABLE_TELEMETRY}" = X"true" ] && telemetry="off"
+[ X"${BINSTALL_NO_DISCOVER_GITHUB_TOKEN}" = X"true" ] && discover="no"
+while [ "${#}" -gt "0" ]; do
+    case "${1}" in
+        -V) printf "%s\n" "cargo-binstall ${FAKE_BINSTALL_VERSION:-9.9.9}"; exit 0 ;;
+        --root) shift; root="${1}" ;;
+        --targets) shift; targets="${targets}${targets:+,}${1}"
+                   case "${1}" in *,*) printf "%s\n" "cargo-binstall: ERROR Failed to parse target triple: ${1}" >&2; exit 1 ;; esac ;;
+        --strategies) shift; strategies="${1}" ;;
+        --log-level) shift ;;
+        --only-signed) signed="only" ;;
+        --disable-telemetry) telemetry="off" ;;
+        --no-discover-github-token) discover="no" ;;
+        -y|--no-confirm) confirm="no" ;;
+        -*) ;;
+        *) spec="${1}" ;;
+    esac
+    shift
+done
+if [ -z "${targets}" ] && [ -n "${envtargets}" ]; then
+    case "${envtargets}" in *,*) printf "%s\n" "cargo-binstall: ERROR Failed to parse target triple: ${envtargets}" >&2; exit 1 ;; esac
+    targets="${envtargets}"
+fi
+
+fail() {
+    printf "%s\n" "cargo-binstall: ERROR Fatal error:" "  x For crate ${name}: ${1}" >&2
+    exit 94
+}
+
+warn() {
+    printf "%s\n" "cargo-binstall:  WARN resolve: ${1}" >&2
+}
+
+log() {
+    [ -n "${FAKE_BINSTALL_LOG}" ] && printf "%s\n" "${*}" >> "${FAKE_BINSTALL_LOG}"
+    return 0
+}
+
+strategies="$(printf "%s\n" "${strategies}" | tr ',' '\n' | \
+    awk -v off=",${BINSTALL_DISABLE_STRATEGIES}," 'NF && index(off, "," $0 ",") == 0' | paste -sd, -)"
+if [ -z "${strategies}" ]; then
+    printf "%s\n" "error: You have disabled all strategies" >&2
+    exit 2
+fi
+
+name="${spec%%@*}"; ver="${spec#*@}"; ver="${ver#=}"
+[ -n "${name}" ] && [ -n "${ver}" ] || exit 2
+cargo_home="${CARGO_HOME:-${HOME}/.cargo}"
+[ -n "${root}" ] || root="${CARGO_INSTALL_ROOT:-${cargo_home}}"
+[ -n "${targets}" ] || targets="$(uname -m)-unknown-linux-gnu,$(uname -m)-unknown-linux-musl"
+
+mkdir -p "${cargo_home}" || exit 1
+[ -f "${cargo_home}/binstall.toml" ] || \
+    printf '%s\n' 'confirm = true' '[telemetry]' 'enabled = true' > "${cargo_home}/binstall.toml"
+token="none"
+if [ -n "${GITHUB_TOKEN}${GH_TOKEN}" ]; then
+    token="env"
+elif [ X"${discover}" = X"yes" ] && [ -f "${HOME}/.git-credentials" ]; then
+    token="discovered"
+fi
+log "install ${name}@${ver} root=${root} targets=${targets} strategies=${strategies} signed=${signed} telemetry=${telemetry} token=${token} discover=${discover} confirm=${confirm} HOME=${HOME} CARGO_HOME=${CARGO_HOME-unset} TMPDIR=${TMPDIR-unset}"
+log "env $(env | awk '/^(BINSTALL|CARGO)_[A-Za-z0-9_]*=/' | LC_ALL=C sort | paste -sd' ' -)"
+
+manifest() {
+    TAR_OPTIONS= GZIP= tar -xzOf "${FAKE_BINSTALL_CRATES}/${name}/${name}-${ver}.crate" "${name}-${ver}/Cargo.toml" 2>/dev/null
+}
+
+sums() {
+    #$1 => a file. Whether its .sig is its sha256
+    [ X"$(cat "${1}.sig" 2>/dev/null)" = X"$(sha256sum "${1}" | awk '{print $1}')" ]
+}
+
+build=""; target=""; source=""
+for s in $(printf "%s\n" "${strategies}" | tr ',' ' '); do
+    case "${s}" in
+        quick-install)
+            if [ -n "${FAKE_BINSTALL_RATE_LIMITED}" ]; then
+                printf "%s\n" "cargo-binstall:  INFO has_release_artifact{url: https://api.github.com/repos/cargo-bins/cargo-quickinstall/releases/tags/${name}-${ver}}: Received status code 403 Forbidden, will wait for 120s and retry" >&2
+                warn "Timeout reached while checking fetcher QuickInstall: deadline has elapsed"
+                continue
+            fi
+            if [ -n "${FAKE_BINSTALL_API_DOWN}" ]; then
+                warn "Error while checking fetcher QuickInstall: Context: 'Restful API', err: 'Remote Error: could not GET https://api.github.com/repos/cargo-bins/cargo-quickinstall/releases/tags/${name}-${ver}: error sending request'"
+                continue
+            fi
+            f=""
+            for t in $(printf "%s\n" "${targets}" | tr ',' ' '); do
+                [ -f "${FAKE_BINSTALL_QUICKINSTALL}/${name}-${ver}/${name}-${ver}-${t}.tar.gz" ] && { f="${FAKE_BINSTALL_QUICKINSTALL}/${name}-${ver}/${name}-${ver}-${t}.tar.gz"; break; }
+            done
+            [ -n "${f}" ] || continue
+            if [ -f "${f}.sig" ]; then
+                sums "${f}" || { warn "Error while downloading and extracting from fetcher QuickInstall: Failed to verify signature: InvalidSignature"; continue; }
+            elif [ X"${signed}" = X"only" ]; then
+                warn "Error while checking fetcher QuickInstall: Failed to download signature: MissingSignature"
+                continue
+            else
+                log "unsigned ${name}@${ver}"
+            fi
+            build="${f}"; target="${t}"; source="quickinstall ${f##*/}"
+            break ;;
+        crate-meta-data)
+            toml="$(manifest)"
+            case "$(printf "%s\n" "${toml}" | awk -F'"' '/^\[/ {s = $0} s == "[package]" && $1 ~ /^repository *= *$/ {print $2; exit}')" in
+                https://github.com/?*/?*) repo="$(printf "%s\n" "${toml}" | awk -F'"' '/^\[/ {s = $0} s == "[package]" && $1 ~ /^repository *= *$/ {sub(/^https:\/\/github\.com\//, "", $2); print $2; exit}')" ;;
+                *) continue ;;
+            esac
+            if [ -n "${FAKE_BINSTALL_RATE_LIMITED}" ]; then
+                printf "%s\n" "cargo-binstall:  INFO has_release_artifact{url: https://api.github.com/repos/${repo}/releases/tags/v${ver}}: Received status code 403 Forbidden, will wait for 120s and retry" >&2
+                warn "Timeout reached while checking fetcher invalid url: deadline has elapsed"
+                continue
+            fi
+            if [ -n "${FAKE_BINSTALL_API_DOWN}" ]; then
+                warn "Error while checking fetcher GhCrateMeta: Context: 'Restful API', err: 'Remote Error: could not GET https://api.github.com/repos/${repo}/releases/tags/v${ver}: error sending request'"
+                continue
+            fi
+            names="${name} $(printf "%s\n" "${toml}" | awk -F'"' '/^\[/ {s = $0} s == "[[bin]]" && $1 ~ /^name *= *$/ {n++; b = $2} END {if (n == 1) print b}')"
+            f=""
+            for t in $(printf "%s\n" "${targets}" | tr ',' ' '); do
+                for g in "v${ver}" "${ver}"; do
+                    for n in ${names}; do
+                        for c in "${n}-v${ver}-${t}.tar.gz" "${n}-${ver}-${t}.tar.gz" "${n}-${t}.tar.gz"; do
+                            [ -f "${FAKE_BINSTALL_GITHUB}/${repo}/releases/download/${g}/${c}" ] && { f="${FAKE_BINSTALL_GITHUB}/${repo}/releases/download/${g}/${c}"; break 4; }
+                        done
+                    done
+                done
+            done
+            [ -n "${f}" ] || continue
+            if printf "%s\n" "${toml}" | grep -x '\[package.metadata.binstall.signing\]' >/dev/null; then
+                sums "${f}" || { warn "Error while downloading and extracting from fetcher github.com: Failed to verify signature: InvalidSignature"; continue; }
+            else
+                log "unsigned ${name}@${ver}"
+            fi
+            build="${f}"; target="${t}"; g="${f%/*}"; source="author ${repo} ${g##*/}/${f##*/}"
+            break ;;
+        compile)
+            log "compile ${name}@${ver}"
+            mkdir -p "${root}/bin" && printf '#!/bin/sh\nprintf "%%s\\n" "%s compiled"\n' "${name}" > "${root}/bin/${name}" && chmod 755 "${root}/bin/${name}"
+            exit "${?}" ;;
+    esac
+done
+[ -n "${build}" ] || fail "Fallback to cargo-install is disabled"
+log "from ${source}"
+
+tmp="${root}/cargo-binstall$$"
+mkdir -p "${tmp}" "${root}/bin" "${root}/binstall" || exit 1
+TAR_OPTIONS= GZIP= tar -xzf "${build}" -C "${tmp}" || { rm -rf "${tmp}"; exit 1; }
+bins=""
+for p in "${tmp}"/* "${tmp}"/*/*; do
+    [ -f "${p}" ] && [ -x "${p}" ] || continue
+    mv "${p}" "${root}/bin/" || exit 1
+    bins="${bins}${bins:+,}\"${p##*/}\""
+done
+rm -rf "${tmp}"
+printf '[v1]\n"%s %s (registry+https://github.com/rust-lang/crates.io-index)" = [%s]\n' "${name}" "${ver}" "${bins}" > "${root}/.crates.toml"
+printf '{"name":"%s","version_req":"=%s","current_version":"%s","target":"%s","bins":[%s]}\n' "${name}" "${ver}" "${ver}" "${target}" "${bins}" > "${root}/binstall/crates-v1.json"
+exit 0

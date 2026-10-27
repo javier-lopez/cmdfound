@@ -1,0 +1,36 @@
+#!/bin/sh
+#a channel that answers only a spec that names it: asked about shyname or its
+#tool shytool without being named, it says no at once. shyhopname it answers
+#to anyone, and it installs that through shy:shytool, so the size of a tool
+#asked of a channel by name is tested too. No other test ever sees it
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+
+_program() {
+    mkdir -p "${CMDFOUND_HOME}/tmp" 2>/dev/null
+    printf "%s\n" '#!/bin/sh' 'printf "%s\n" "shy ran"' > "${CMDFOUND_HOME}/tmp/shy-${1}"
+    printf "%s\n" "${CMDFOUND_HOME}/tmp/shy-${1}"
+}
+
+case "${1}" in
+    meta)   printf "%s\n" "kind=artifact" "confines=no" "describes=self" ;;
+    probe)  case "${2}" in
+                shyhopname)
+                    case " ${CMDFOUND_NO_MANAGER} " in *" ${SELF_NAME} "*) exit 1 ;; esac
+                    printf "%s\n" "version=1.0" "bytes=100" "requires=shy:shytool"; exit 0 ;;
+                shyname|shytool) ;;
+                *) exit 1 ;;
+            esac
+            [ X"${CMDFOUND_NAMED}" = X"${SELF_NAME}" ] || exit 1
+            case "${2}" in
+                shyname) printf "%s\n" "version=1.0" "bytes=10" ;;
+                shytool) printf "%s\n" "version=2.0" "bytes=5" ;;
+            esac ;;
+    locate) case "${2}" in shyname|shytool) ;; *) exit 1 ;; esac
+            printf "url=%s\n" "$(_program "${2}")"
+            printf "%s\n" "format=raw" "bin=${2}" ;;
+    *) exit 1 ;;
+esac

@@ -1,0 +1,49 @@
+#!/bin/sh
+#a stand-in for curl, for the cmdfound tests, serving one file the way a
+#server with ranges and a strong etag does: FAKE_CURL_BODY, under the etag
+#FAKE_CURL_ETAG, "cf1" when unset. It answers only what a resumable download
+#asks: -D headers -o file -w '%{http_code}', with -C - and If-Range to go on.
+#
+#  a first request writes the headers and the first 1000 bytes, and then with
+#  FAKE_CURL_STALL=1 waits to be stopped, or else writes the rest; 200
+#  -C - with If-Range naming the etag appends the rest of the file; 206
+#  -C - with any other If-Range writes nothing and fails as curl does when a
+#  server sends the whole file instead; 200, status 33
+#
+#FAKE_CURL_LOG, when set, records each request: whether it went on, and its If-Range
+#
+#A curl not given -q first is refused, status 97: the real one would read the
+#user's ~/.curlrc into the download
+
+[ X"${1}" = X"-q" ] || exit 97
+headers=""; out=""; resume=""; ifrange=""
+while [ "${#}" -gt "0" ]; do
+    case "${1}" in
+        -D) shift; headers="${1}" ;;
+        -o) shift; out="${1}" ;;
+        -C) shift; resume="1" ;;
+        -H) shift; case "${1}" in "If-Range: "*) ifrange="${1#If-Range: }" ;; esac ;;
+    esac
+    shift
+done
+etag="\"${FAKE_CURL_ETAG:-cf1}\""
+[ -n "${FAKE_CURL_LOG}" ] && printf "%s\n" "resume=${resume:-0} if-range=${ifrange}" >> "${FAKE_CURL_LOG}"
+
+if [ -n "${resume}" ]; then
+    if [ X"${ifrange}" != X"${etag}" ]; then
+        printf "%s" "200"
+        exit 33
+    fi
+    have="$(wc -c < "${out}" | awk '{print $1}')"
+    printf 'HTTP/1.1 206 Partial Content\r\nETag: %s\r\n\r\n' "${etag}" > "${headers}"
+    tail -c +"$((have + 1))" "${FAKE_CURL_BODY}" >> "${out}"
+    printf "%s" "206"
+    exit 0
+fi
+
+printf 'HTTP/1.1 200 OK\r\nETag: %s\r\n\r\n' "${etag}" > "${headers}"
+dd if="${FAKE_CURL_BODY}" of="${out}" bs=1000 count=1 2>/dev/null
+[ -n "${FAKE_CURL_STALL}" ] && exec sleep 30
+tail -c +1001 "${FAKE_CURL_BODY}" >> "${out}"
+printf "%s" "200"
+exit 0

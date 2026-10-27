@@ -1,0 +1,29 @@
+#!/bin/sh
+#a channel that is cheap on its own and installs through a tool it does not
+#have yet. What is still missing is both, so a channel that is dearer on its
+#own but needs nothing has to win until the tool is here. Installing writes a
+#launcher that runs the tool, and says nothing of how long any of it took; the
+#launcher says, in a comment, the bytes CMDFOUND_BYTES told it. Its probe
+#says nothing checks what the tool installs, badge=none, or claims what
+#FAKE_NEEDSTOOL_BADGE says instead; and it answers alpha/hopname as well, a
+#package named as another channel's, the way a runtime's path names a catalog's
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+
+case "${1}" in
+    meta)  printf "%s\n" "kind=artifact" "confines=no" "describes=self" ;;
+    probe) case "${2}" in hopname|alpha/hopname) ;; *) exit 1 ;; esac
+           printf "%s\n" "version=1.0" "bytes=100" "badge=${FAKE_NEEDSTOOL_BADGE-none}" "requires=alpha:tiny" ;;
+    locate) [ X"${2}" = X"hopname" ] || exit 1
+           printf "%s\n" "bin=hopname" ;;
+    obtain) [ X"${2}" = X"hopname" ] && [ -x "${CMDFOUND_REQUIRED}" ] || exit 1
+           run="run/hopname/${3}"; dir="${CMDFOUND_HOME}/channels/${SELF_NAME}/${run}"
+           mkdir -p "${dir}" && \
+               printf "%s\n" '#!/bin/sh' "#told ${CMDFOUND_BYTES-unset} bytes" "exec \"${CMDFOUND_REQUIRED}\" hopname \"\$@\"" > "${dir}/hopname" && \
+               chmod 755 "${dir}/hopname" || exit 1
+           printf "%s\n" "program=${dir}/hopname" "asset=hopname" "member=${run}" ;;
+    *) exit 1 ;;
+esac

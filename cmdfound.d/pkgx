@@ -1,0 +1,516 @@
+#!/bin/sh
+#description: cmdfound channel - pkgx's pantry, installed and run by pkgx
+#usage: pkgx meta | pkgx index [bytes] | pkgx search WORDS...
+#       pkgx probe NAME|PROJECT [VER] | pkgx locate PROJECT VER [PROGRAM]
+#       pkgx obtain PROJECT VER [PROGRAM]
+
+#laid out the same for pkgx 1 and 2. The user's own PKGX_DIST_URL reaches pkgx,
+#so the question is read from there too: what it shows is what pkgx downloads
+DIST="${CMDFOUND_PKGX_DIST:-${PKGX_DIST_URL:-https://dist.pkgx.dev}}"
+#CMDFOUND_CHANNEL_FILE and not $0: the resolver sources this, and $0 is its own
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+#all the channel has is under it, so one rm -rf removes the channel whole
+CH="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+#the catalog's first line names the pantry it was read from, so one rename
+#puts the pair in place and no reader sees half of each. PANTRY is what
+#_pantry reads off that line, index/none before there is a catalog
+INDEX="${CH}/index/pkgx.tsv"
+PANTRY="${CH}/index/none"
+CELLAR="${CH}/cellar"
+META="${CH}/cache"
+
+_platform() {
+    _util_machine_in
+    case "${_util_machine_in__os}/${_util_machine_in__cpu}" in
+        Linux/x86_64|Linux/amd64)  printf "%s\\n" "linux/x86-64" ;;
+        Linux/aarch64|Linux/arm64) printf "%s\\n" "linux/aarch64" ;;
+        *) return 1 ;;
+    esac
+}
+
+_versions_in() {
+    #$1 => project, and its versions in __out, one per line; 2 with why when not asked
+    #    _versions_in curl.se  =>  0, 8.9.1
+    #                                 8.10.0
+    #    _versions_in no.such  =>  1
+    _versions_in__out=""
+    _versions_in__f="${META}/versions/${1}/versions.txt"
+    _api_is_fresh "${_versions_in__f}" && { _versions_in__out="$(cat "${_versions_in__f}")"; return 0; }
+    _util_mkdir_p "${_versions_in__f%/*}"
+    _api_fetcher_answered "${DIST}/${1}/$(_platform)/versions.txt" "${_versions_in__f}.$$"
+    case "${?}" in
+        0)  #kept one version per line with the last one ended, so nothing
+            #appended after it can fuse with the newest version
+            awk 'NF {print $1}' "${_versions_in__f}.$$" > "${_versions_in__f}.$$.n"
+            mv "${_versions_in__f}.$$.n" "${_versions_in__f}"; rm -f "${_versions_in__f}.$$"
+            _versions_in__out="$(cat "${_versions_in__f}")"; return 0 ;;
+        1)  return 1 ;;
+        *)  #yesterday's list is still a list of versions that exist
+            [ -s "${_versions_in__f}" ] && { _versions_in__out="$(cat "${_versions_in__f}")"; return 0; }
+            why="${DIST} could not be asked for the versions of ${1}"
+            return 2 ;;
+    esac
+}
+
+_newest() {
+    #$1 => a version to find, optional; of those on stdin, it or the newest, as pkgx does
+    #    1.22.1, 2026.8.0        =>  1.22.1  a major of 1996 on is 0.0.0.<date>
+    #    1.1.1, 1.1.1w           =>  1.1.1w  a letter is a component, w being 23
+    #    2.5.0-rc.1, 2.5         =>  2.5.0   a prerelease is below its release
+    #    2.5.0, 2.6.0, with 2.5  =>  2.5.0
+    _newest__want="${1}"
+    LC_ALL=C awk -v want="${_newest__want}" '
+        function parse(s, id,   core, rest, n, i, letter, raw) {
+            sub(/^v+/, "", s)
+            if (s !~ /^[0-9]+(\.[0-9]+)*[a-z]?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/) return 0
+            raw = s
+            match(s, /^[0-9]+(\.[0-9]+)*/); core = substr(s, 1, RLENGTH); rest = substr(s, RLENGTH + 1)
+            n = split(core, c, "."); for (i = 1; i <= n; i++) cc[id, i] = c[i] + 0
+            if (rest ~ /^[a-z]/) { cc[id, ++n] = index("abcdefghijklmnopqrstuvwxyz", substr(rest, 1, 1)); rest = substr(rest, 2) }
+            cn[id] = n; pre[id] = ""; bld[id] = ""
+            if (rest ~ /^-/) { match(rest, /^-[0-9A-Za-z.-]+/); pre[id] = substr(rest, 2, RLENGTH - 1); rest = substr(rest, RLENGTH + 1) }
+            if (rest ~ /^\+/) bld[id] = substr(rest, 2)
+            if (raw ~ /^[0-9]+(\.[0-9]+)?([-+].*)?$/) {
+                raw = cc[id, 1] "." ((n >= 2) ? cc[id, 2] : 0) "." ((n >= 3) ? cc[id, 3] : 0)
+                if (pre[id] != "") raw = raw "-" pre[id]
+                if (bld[id] != "") raw = raw "+" bld[id]
+            }
+            out[id] = raw
+            return 1
+        }
+        function list(a, b,   pa, pb, na, nb, n, i) {
+            na = (a == "") ? 0 : split(a, pa, "."); nb = (b == "") ? 0 : split(b, pb, ".")
+            n = (na > nb) ? na : nb
+            for (i = 1; i <= n; i++) {
+                if (i > na) return -1
+                if (i > nb) return 1
+                if ((pa[i] "") > (pb[i] "")) return 1
+                if ((pa[i] "") < (pb[i] "")) return -1
+            }
+            return 0
+        }
+        function cmp(a, b,   oa, ob, n, i, x, y) {
+            oa = (cc[a, 1] >= 1996) ? 3 : 0; ob = (cc[b, 1] >= 1996) ? 3 : 0
+            n = (cn[a] + oa > cn[b] + ob) ? cn[a] + oa : cn[b] + ob
+            for (i = 1; i <= n; i++) {
+                x = (i <= oa || i - oa > cn[a]) ? 0 : cc[a, i - oa]
+                y = (i <= ob || i - ob > cn[b]) ? 0 : cc[b, i - ob]
+                if (x != y) return (x < y) ? -1 : 1
+            }
+            if (pre[a] == "" && pre[b] != "") return 1
+            if (pre[a] != "" && pre[b] == "") return -1
+            i = list(pre[a], pre[b]); if (i) return i
+            return list(bld[a], bld[b])
+        }
+        BEGIN { if (want != "" && !parse(want, "want")) exit }
+        NF && parse($1, NR) {
+            if (want != "") { if (cmp(NR, "want") == 0) best = NR }
+            else if (best == "" || cmp(NR, best) >= 0) best = NR
+        }
+        END { if (best != "") print out[best] }'
+}
+
+_batch() {
+    #$1 => questions gone out; waits every sixteen
+    [ $(( ${1} % 16 )) -eq 0 ] && wait
+    return 0
+}
+
+_bottle() {
+    printf "%s\\n" "${DIST}/${1}/$(_platform)/v${2}.tar.xz"
+}
+
+_bottle_bytes() {
+    #$1 => project, $2 => version, and the bottle's size, asked once
+    #    _bottle_bytes curl.se 8.10.0  =>  2345678
+    _bb__f="${META}/sizes/${1}/v${2}"
+    [ -s "${_bb__f}" ] && { cat "${_bb__f}"; return 0; }
+    _bb__n="$(_api_fetcher_head_size "$(_bottle "${1}" "${2}")")"
+    [ -z "${_bb__n}" ] && return 1
+    _util_mkdir_p "${_bb__f%/*}" && printf "%s\\n" "${_bb__n}" > "${_bb__f}"
+    printf "%s\\n" "${_bb__n}"
+}
+
+_indexer() {
+    #package.yml paths on stdin; prints lines a tab apart
+    #    .../projects/curl.se/package.yml  =>  name  curl.se  cURL
+    #                                          dep   curl.se  openssl.org
+    #                                          cmd   curl     curl.se
+    while read -r _indexer__f; do
+        _indexer__p="${_indexer__f%/package.yml}"
+        _indexer__p="${_indexer__p#*/projects/}"
+        printf "%s\\t%s\\n" "${_indexer__p}" "${_indexer__f}"
+    done | awk -F'\t' '
+        function unquote(v) {
+            if (v ~ /^"/)      { sub(/^"/, "", v); sub(/"[ \t]*(#.*)?$/, "", v) }
+            else if (v ~ /^'\''/) { sub(/^'\''/, "", v); sub(/'\''[ \t]*(#.*)?$/, "", v) }
+            else               { sub(/^#.*$/, "", v); sub(/[ \t]+#.*$/, "", v); sub(/[ \t]+$/, "", v) }
+            return v
+        }
+        {
+            project = $1; file = $2; sect = ""; sub_key = ""; sub_ind = -1; pend = ""
+            while ((getline line < file) > 0) {
+                if (line ~ /^[ \t]*#/ || line ~ /^[ \t]*$/) continue
+                if (sect == "display-name") {
+                    if (line ~ /^ /) {
+                        val = line; sub(/^ +/, "", val); val = unquote(val)
+                        if (val != "") printf("name\t%s\t%s\n", project, val)
+                    }
+                    sect = ""
+                    if (line ~ /^ /) continue
+                }
+                #yaml lets a list sit at the same column as its key, so a
+                #"- " at column 0 is still an item of provides
+                if (sect == "provides" && line ~ /^- /) line = " " line
+                if (line ~ /^[^ ]/) {
+                    sect = ""; sub_key = ""; sub_ind = -1; pend = ""
+                    if (match(line, /^[A-Za-z0-9_-]+:/)) {
+                        key = substr(line, 1, RLENGTH - 1)
+                        val = substr(line, RLENGTH + 1); sub(/^[ \t]+/, "", val)
+                        if (key == "display-name") {
+                            val = unquote(val)
+                            if (val != "") printf("name\t%s\t%s\n", project, val)
+                            else sect = key
+                        } else if (key == "provides" || key == "dependencies" || key == "companions") {
+                            sect = key
+                        }
+                    }
+                    continue
+                }
+                if (sect == "") continue
+                match(line, /^ +/); ind = RLENGTH; body = substr(line, ind + 1)
+                if (sub_ind >= 0 && ind <= sub_ind) { sub_key = ""; sub_ind = -1 }
+
+                if (sect == "provides") {
+                    if (body ~ /^[A-Za-z0-9\/_-]+:[ \t]*(#.*)?$/) {
+                        sub_key = body; sub(/:.*$/, "", sub_key); sub_ind = ind; continue
+                    }
+                    if (body !~ /^- /) continue
+                    if (sub_ind >= 0 && sub_key != "linux") continue
+                    item = body; sub(/^- +/, "", item); item = unquote(item)
+                    n = split(item, parts, "/"); prog = parts[n]
+                    #a name with a template in it is kept by pkgx as written,
+                    #braces and all, and nobody types that
+                    if (prog != "" && prog !~ /[{} ]/) printf("cmd\t%s\t%s\n", prog, project)
+                    continue
+                }
+
+                #dependencies and companions. A project whose constraint is on
+                #the lines below it is still a dependency: yaml folds them into
+                #its value, and pkgx reads "14" where the file says
+                #"gnu.org/gcc:" and then "14" on its own line
+                if (pend != "") {
+                    if (ind > pend_ind && body !~ /^[^:#]+:/) {
+                        if (pend_counts) printf("dep\t%s\t%s\n", project, pend)
+                        pend = ""; continue
+                    }
+                    pend = ""
+                }
+                if (!match(body, /^[^:#]+:/)) continue
+                k = substr(body, 1, RLENGTH - 1); v = substr(body, RLENGTH + 1)
+                sub(/^[ \t]+/, "", v); v = unquote(v)
+                sub(/^[ \t]+/, "", k); sub(/[ \t]+$/, "", k)
+                counts = (sub_ind < 0 || sub_key == "linux")
+                if (v == "") {
+                    #every project has a dot in its name and no platform key
+                    #does, so a key with nothing after it is either a project
+                    #whose value comes next, or a block. Only linux is read
+                    if (index(k, ".")) { pend = k; pend_ind = ind; pend_counts = counts }
+                    else               { sub_key = k; sub_ind = ind }
+                    continue
+                }
+                if (!counts) continue
+                if (k == "linux" || k == "darwin" || k == "windows") continue
+                printf("dep\t%s\t%s\n", project, k)
+            }
+            close(file)
+        }'
+}
+
+_resolve() {
+    #$1 => a program or a project, $2 => the program asked for; sets project and cmd
+    #    _resolve curl curl     =>  0, curl.se curl
+    #    _resolve curl.se jq    =>  0, curl.se curl
+    #    _resolve no.such x     =>  1
+    _resolve__name="${1}"; _resolve__want="${2}"
+    why=""; project=""; cmd=""; cands=""; noindex=""
+    if [ ! -s "${INDEX}" ]; then
+        why="${NO_INDEX}"; noindex="1"
+        return 2
+    fi
+    cands="$(awk -F'\t' -v n="${_resolve__name}" '$1 == "cmd" && $2 == n {print $3}' "${INDEX}" | LC_ALL=C sort -u)"
+    _util_is_one_line "${cands}" && { project="${cands}"; cmd="${_resolve__name}"; return 0; }
+    [ -n "${cands}" ] && return 3
+
+    cmd="$(awk -F'\t' -v p="${_resolve__name}" -v want="${_resolve__want}" '
+        $1 == "cmd" && $3 == p {
+            if ($2 == want) { hit = $2 }
+            n = split(p, parts, "/"); if ($2 == parts[n]) own = $2
+            if (first == "") first = $2
+        }
+        $1 == "dep" && $2 == p { known = 1 }
+        $1 == "name" && $2 == p { known = 1 }
+        END {
+            if (hit != "") print hit; else if (own != "") print own
+            else if (first != "") print first; else if (known) print "-"
+        }' "${INDEX}")"
+    [ -z "${cmd}" ] && return 1
+    project="${_resolve__name}"
+    return 0
+}
+
+_closure() {
+    #$1 => project; it and all it depends on, companions included
+    #    _closure curl.se  =>  curl.se
+    #                          openssl.org
+    #                          curl.se/ca-certs
+    awk -F'\t' -v root="${1}" '
+        $1 == "dep" { n = ++count[$2]; dep[$2, n] = $3 }
+        END {
+            queue[1] = root; seen[root] = 1; head = 1; tail = 1
+            while (head <= tail) {
+                p = queue[head++]; print p
+                for (i = 1; i <= count[p]; i++) {
+                    d = dep[p, i]
+                    if (!(d in seen)) { seen[d] = 1; queue[++tail] = d }
+                }
+            }
+        }' "${INDEX}"
+}
+
+_pantry() {
+    #sets PANTRY to the pantry the catalog was read from
+    PANTRY="${CH}/index/none"
+    { read -r _pa__k _pa__d || :; } 2>/dev/null < "${INDEX}"
+    case "${_pa__k}/${_pa__d}" in
+        pantry/pantry.*) PANTRY="${CH}/index/${_pa__d}" ;;
+    esac
+    return 0
+}
+
+_run_tool() {
+    #$1... => what pkgx is asked, on this channel's cellar and pantry
+    if [ -n "${CMDFOUND_PKGX_DIST}" ]; then
+        PKGX_DIR="${CELLAR}" PKGX_PANTRY_DIR="${PANTRY}" PKGX_DIST_URL="${DIST}" "${CMDFOUND_REQUIRED}" "${@}"
+    else
+        PKGX_DIR="${CELLAR}" PKGX_PANTRY_DIR="${PANTRY}" "${CMDFOUND_REQUIRED}" "${@}"
+    fi
+}
+
+_installed_rows() {
+    #pkgx --json=v2 on stdin; prints project and version, a tab apart, per package
+    #    {"pkgs":{"curl.se":{"project":"curl.se","version":"8.10.0"}}}  =>  curl.se<TAB>8.10.0
+    _util_json 3 | awk -F'\t' '
+        {
+            n = split($1, p, "/")
+            if (n < 3 || p[1] != "pkgs") next
+            k = $1; sub(/\/[^\/]*$/, "", k)
+            if (p[n] == "project") v[k, "p"] = $2
+            else if (p[n] == "version") v[k, "v"] = $2
+            else next
+            if (!(k in seen)) { seen[k] = 1; order[++m] = k }
+        }
+
+        #a package is one once it has both, which the end is when it is known
+        END {
+            for (i = 1; i <= m; i++) {
+                k = order[i]
+                if (v[k, "p"] != "" && v[k, "v"] != "")
+                    printf("%s\t%s\n", v[k, "p"], v[k, "v"])
+            }
+        }'
+}
+
+_meta() {
+    printf "%s\\n" "kind=artifact" "confines=no" "describes=self" "manager=github:pkgxdev/pkgx"
+    exit 0
+}
+
+_index() {
+    #$1 => bytes, to ask only what the pantry weighs
+    mode="${1}"
+    _platform >/dev/null || _api_answer_unreachable "pkgx builds nothing for ${_util_machine_in__os}/${_util_machine_in__cpu}"
+    if [ X"${mode}" = X"bytes" ]; then
+        _api_answer_bytes_of "${DIST}/pantry.tar.xz"
+    fi
+    _util_mkdir_p "${CH}/index" || exit 1
+    kept="${CH}/index/pantry.tar.xz.part"; part="${kept}.$$"; new="${CH}/index/pantry.$$"
+    _api_catalog_fetch "${DIST}/pantry.tar.xz" "${kept}" pkgx
+    bytes="$(wc -c < "${part}" | awk '{print $1}')"
+    #stopped from here on, the old pantry could be left half replaced
+    trap '' TERM INT HUP
+    #a user's TAR_OPTIONS=--to-stdout would leave the pantry empty
+    _util_mkdir_p "${new}" && TAR_OPTIONS= tar -xJf "${part}" -C "${new}" 2> "${new}.err"
+    rc="${?}"; rm -f "${part}"
+    if [ "${rc}" -ne "0" ] || [ ! -d "${new}/projects" ]; then
+        said="$(_util_first_line "$(cat "${new}.err" 2>/dev/null)" "tar gave no reason")"
+        rm -rf "${new}" "${new}.err"
+        if command -v xz >/dev/null 2>&1; then
+            printf "unreachable=%s\\n" "pkgx's catalog could not be unpacked: ${said}"
+        else
+            printf "unreachable=%s\\n" "pkgx's catalog could not be unpacked, which needs xz"
+        fi
+        exit 2
+    fi
+    rm -f "${new}.err"
+    tsv="${INDEX}.$$"
+    printf "pantry\\t%s\\n" "${new##*/}" > "${tsv}" && \
+        find "${new}/projects" -name package.yml | LC_ALL=C sort | _indexer | LC_ALL=C sort -u >> "${tsv}"
+
+    _api_catalog_keep "${tsv}" "${INDEX}" "$(awk -F'\t' '$1 == "cmd"' "${tsv}" | awk 'END {print NR}')" "pkgx's catalog" "${new}"
+    #a pantry still being built by a live run is left alone
+    for old in "${CH}"/index/pantry "${CH}"/index/pantry.*; do
+        [ -d "${old}" ] || continue
+        [ X"${old}" = X"${new}" ] && continue
+        case "${old##*/}" in
+            pantry.*) kill -0 "${old##*.}" 2>/dev/null && continue ;;
+        esac
+        rm -rf "${old}"
+    done
+    printf "packages=%s\\n" "$(awk -F'\t' '$1 == "cmd" && !seen[$3]++' "${INDEX}" | awk 'END {print NR}')"
+    printf "names=%s\\n" "$(awk -F'\t' '$1 == "cmd" && !seen[$2]++' "${INDEX}" | awk 'END {print NR}')"
+    printf "bytes=%s\\n" "${bytes}"
+    exit 0
+}
+
+_search() {
+    #$1... => the words to search
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    search_words="${*}" awk -F'\t' "${SEARCH_AWK}"'
+        $1 == "cmd"  { hay[$3] = hay[$3] " " $2; if (!($3 in first)) first[$3] = $2 }
+        $1 == "name" { hay[$2] = hay[$2] " " $3; label[$2] = $3 }
+        END {
+            for (p in first)
+                if (words_in(p " " hay[p])) printf("pkgx:%s\t%s\t%s\n", p, first[p], (p in label) ? label[p] : "provides" hay[p])
+        }' "${INDEX}" | LC_ALL=C sort
+    exit 0
+}
+
+_probe() {
+    #$1 => a name or a project, $2 => a version
+    name="${1}"; ver="${2}"
+    [ -z "${name}" ] && exit 1
+    _platform >/dev/null || exit 1
+    _resolve "${name}" "${name}"; _api_answer_unresolved "${?}"
+    [ X"${cmd}" = X"-" ] && exit 1
+    _util_has_word "${CMDFOUND_NO_MANAGER}" "${SELF_NAME}" && exit 1
+
+    _versions_in "${project}"
+    case "${?}" in
+        0) ;;
+        1) exit 1 ;;
+        *) _api_answer_unreachable "${why}" ;;
+    esac
+    list="${_versions_in__out}"
+    version="$(printf "%s\\n" "${list}" | _newest "${ver}")"
+    [ -z "${version}" ] && exit 1
+
+    work="${META}/probe.$$"; _util_mkdir_p "${work}" || exit 1
+    i=0
+    for member in $(_closure "${project}"); do
+        i=$((i + 1))
+        (
+            if [ X"${member}" = X"${project}" ]; then
+                v="${version}"
+            else
+                v=""
+                _versions_in "${member}" && v="$(printf "%s\\n" "${_versions_in__out}" | _newest)"
+            fi
+            [ -z "${v}" ] && { printf "%s\\n" "none" > "${work}/${i}"; exit 0; }
+            [ -d "${CELLAR}/${member}/v${v}" ] && { printf "%s\\n" "0" > "${work}/${i}"; exit 0; }
+            s="$(_bottle_bytes "${member}" "${v}")" || s="unknown"
+            printf "%s\\n" "${s}" > "${work}/${i}"
+        ) &
+        _batch "${i}"
+    done
+    wait
+    bytes="$(cat "${work}"/* 2>/dev/null | awk '
+        /^[0-9]+$/ {t += $1; next}
+        $1 == "unknown" {u = 1}
+        END {if (!u) print t + 0}')"
+    rm -rf "${work}"
+
+    printf "version=%s\\n" "${version}"
+    [ -n "${bytes}" ] && printf "bytes=%s\\n" "${bytes}"
+    printf "estimate=%s\\n" "yes"
+    printf "package=%s\\n" "${project}"
+    printf "requires=%s\\n" "github:pkgxdev/pkgx"
+    exit 0
+}
+
+_locate() {
+    #$1 => a project, $2 => a version, $3 => the program asked for
+
+    #no sum: pkgx checks what it downloads
+    [ -z "${1}" ] || [ -z "${2}" ] && exit 1
+    _platform >/dev/null || exit 1
+    _resolve "${1}" "${3}"; _api_answer_unresolved "${?}"
+    [ X"${cmd}" = X"-" ] && exit 1
+    printf "url=%s\\n" "$(_bottle "${project}" "${2}")"
+    printf "format=%s\\n" "tar.xz"
+    printf "bin=%s\\n" "${cmd}"
+    exit 0
+}
+
+_obtain() {
+    #$1 => a project, $2 => a version, $3 => the program asked for
+    name="${1}"; ver="${2}"; want="${3}"
+    [ -z "${name}" ] || [ -z "${ver}" ] && exit 1
+    _pantry
+    _resolve "${name}" "${want}"; _api_answer_unresolved "${?}"
+    [ X"${cmd}" = X"-" ] && _api_answer_failed "${project} provides no program"
+    if [ ! -x "${CMDFOUND_REQUIRED}" ]; then
+        _api_answer_unreachable "pkgx is not available to install ${project}"
+    fi
+    if _api_is_unsafe "${CH}" || _api_is_unsafe "${CMDFOUND_REQUIRED}"; then
+        _api_answer_failed "${LAUNCHER_UNSAFE}"
+    fi
+    _api_is_program_name "${cmd}" || \
+        _api_answer_failed "'${cmd}' is not a program this channel will write a launcher for"
+
+    answer="$(_run_tool --json=v2 "+${project}=${ver}")"
+    if [ "${?}" -ne "0" ]; then
+        _api_answer_failed "pkgx could not install ${project} ${ver}"
+    fi
+    members="$(printf "%s\\n" "${answer}" | _installed_rows)"
+    if [ -z "${members}" ]; then
+        _api_answer_failed "pkgx installed ${project} and said nothing this channel could read about it"
+    fi
+    if printf "%s\\n" "${members}" | awk -F'\t' '($1 "/" $2) ~ /\.\.|^\/|[^A-Za-z0-9._+\/-]/ {bad = 1} END {exit !bad}'; then
+        _api_answer_failed "pkgx named a package this channel will not record"
+    fi
+    if [ ! -x "${CELLAR}/${project}/v${ver}/bin/${cmd}" ] && [ ! -x "${CELLAR}/${project}/v${ver}/sbin/${cmd}" ]; then
+        _api_answer_failed "pkgx installed ${project} ${ver} but it has no program called ${cmd}"
+    fi
+
+    run="${CH}/run/${project}/${ver}"
+    _util_mkdir_p "${run}" || exit 1
+    {
+        printf "%s\\n" "#!/bin/sh" "#written by cmdfound: ${cmd}, from ${project} ${ver}, run by pkgx"
+        #the pantry is read at each run: an update moves it to another directory
+        printf 'PKGX_DIR="%s"\nPKGX_PANTRY_DIR="%s/index/none"\n' "${CELLAR}" "${CH}"
+        printf 'read -r _k _d 2>/dev/null < "%s"\n' "${INDEX}"
+        printf 'case "${_k}/${_d}" in pantry/pantry.*) PKGX_PANTRY_DIR="%s/index/${_d}" ;; esac\n' "${CH}"
+        printf 'export PKGX_DIR PKGX_PANTRY_DIR\n'
+        [ -n "${CMDFOUND_PKGX_DIST}" ] && ! _api_is_unsafe "${DIST}" && \
+            printf 'PKGX_DIST_URL="%s"\nexport PKGX_DIST_URL\n' "${DIST}"
+        printf 'exec "%s" "+%s=%s" -- "%s" "$@"\n' "${CMDFOUND_REQUIRED}" "${project}" "${ver}" "${cmd}"
+    } | _util_write_aside "${run}/${cmd}" 755
+
+    printf "program=%s\\n" "${run}/${cmd}"
+    printf "asset=%s\\n" "${project}/v${ver}"
+    printf "%s\\n" "${members}" | awk -F'\t' '{printf("member=cellar/%s/v%s\n", $1, $2)}'
+    exit 0
+}
+
+case "${1}" in
+    meta)   _meta ;;
+    index)  _index "${2}" ;;
+    search) shift; _search "${@}" ;;
+    probe)  _probe "${2}" "${3}" ;;
+    locate) _locate "${2}" "${3}" "${4}" ;;
+    obtain) _obtain "${2}" "${3}" "${4}" ;;
+
+    *) printf "%s\\n" "usage: ${SELF_NAME} meta|index|search|probe|locate|obtain" >&2; exit 1 ;;
+esac

@@ -1,0 +1,23 @@
+#!/bin/sh
+#a channel whose catalog is read with a program that only this same channel
+#would provide, once its catalog were read. Asked for, it must end in "could
+#not be had" and not in a resolution waiting on itself forever. It only
+#answers names that start with "selfish" or "srneed-selfish"
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+h="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+
+case "${1}" in
+    meta)   printf "%s\n" "kind=artifact" "confines=no" "describes=self" "needs=srneed-selfish" ;;
+    index)  command -v srneed-selfish >/dev/null 2>&1 || {
+                printf "%s\n" "unreachable=srneed-selfish is not here to read the catalog with"; exit 2; }
+            exit 2 ;;
+    probe|locate)
+            case "${2}" in selfish*|srneed-selfish) ;; *) exit 1 ;; esac
+            printf "%s\n" "unreachable=no local catalog yet" "needs=index"
+            exit 2 ;;
+    *) exit 1 ;;
+esac

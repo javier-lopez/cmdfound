@@ -1,0 +1,69 @@
+#!/bin/sh
+#a runtime that starts a program in a tenth of a second and does not have the
+#image yet, so running anything through it fetches the image once. It is
+#asked about a package only with an image to run it in, and says no to
+#everything else at once, so no other test ever waits on it. Named in
+#FAKE_BOX_DOWN, it is one that cannot be asked; FAKE_BOX_LOG, when set, is
+#where it writes down what it was asked. Obtaining installs nothing: it writes
+#a launcher for the program the catalog's recipe names, and says what each
+#step took in figures of its own, the same every time, so that what is kept of
+#them can be checked exactly. One of them names no step, and is not kept. What
+#it installed weighs what CMDFOUND_BYTES says, as a real runtime says it, and
+#the log has what it was told there.
+#FAKE_BOX_SETUP, when set, is an engine it also lacks and names in a second
+#once= line, as udocker lacks its engines and the image. FAKE_BOX_BADONCE is
+#two malformed lines: one of three fields, with its badge missing, and one of
+#five, with a field nobody asked for.
+#FAKE_BOX_LAYER, a number of 4 KB blocks, is a layer every placement shares:
+#written once, and linked into each placement, as micromamba links its cache
+#into each environment. It keeps no store of its own, and asked to size or
+#reclaim it says no, writing down that it was asked
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+
+case "${1}" in
+    meta)  printf "%s\n" "kind=runtime" "confines=yes" ;;
+    probe) [ -n "${CMDFOUND_IMAGE}" ] || exit 1
+           case "${2}" in */*) ;; *) exit 1 ;; esac
+           [ -z "${FAKE_BOX_LOG}" ] || \
+               printf "%s\n" "${SELF_NAME} ${2} ${3} ${CMDFOUND_IMAGE} ${CMDFOUND_IMAGE_BYTES:--}" >> "${FAKE_BOX_LOG}"
+           case " ${FAKE_BOX_DOWN} " in
+               *" ${SELF_NAME} "*) printf "%s\n" "unreachable=the fake daemon is down"; exit 2 ;;
+           esac
+           printf "%s\n" "run_ms=100" "once=image|${CMDFOUND_IMAGE}|${CMDFOUND_IMAGE_BYTES:--}|via ${SELF_NAME}"
+           [ -z "${FAKE_BOX_SETUP}" ] || printf "%s\n" "once=setup|${FAKE_BOX_SETUP}|100|none"
+           [ -z "${FAKE_BOX_BADONCE}" ] || printf "%s\n" "once=setup|${FAKE_BOX_BADONCE}|100" \
+               "once=setup|${FAKE_BOX_BADONCE}-x|100|none|extra" ;;
+    obtain)
+           case "${2}" in */*) ;; *) exit 1 ;; esac
+           bin=""; recipe=""
+           while IFS= read -r line; do
+               case "${line}" in bin=?*) bin="${line#bin=}" ;; esac
+               recipe="${recipe}${line};"
+           done <<RECIPE
+${CMDFOUND_RECIPE}
+RECIPE
+           [ -n "${bin}" ] || { printf "%s\n" "failed=no recipe to install ${2} with"; exit 1; }
+           [ -z "${FAKE_BOX_LOG}" ] || \
+               printf "%s\n" "${SELF_NAME} obtain ${2} ${3} ${4} required=${CMDFOUND_REQUIRED-unset} bytes=${CMDFOUND_BYTES-unset} path=${PATH%%:*} recipe=${recipe}" >> "${FAKE_BOX_LOG}"
+           run="run/${2}/${3}"; dir="${CMDFOUND_HOME}/channels/${SELF_NAME}/${run}"
+           mkdir -p "${dir}" && \
+               printf "%s\n" '#!/bin/sh' "printf \"%s\\n\" \"${bin} ran in ${SELF_NAME}\" \"\$@\"" > "${dir}/${bin}" && \
+               chmod 755 "${dir}/${bin}" || { printf "%s\n" "failed=no launcher could be written"; exit 1; }
+           if [ -n "${FAKE_BOX_LAYER}" ]; then
+               layer="${CMDFOUND_HOME}/channels/${SELF_NAME}/layer"
+               { [ -f "${layer}/blob" ] || { mkdir -p "${layer}" && \
+                   dd if=/dev/urandom of="${layer}/blob" bs=4096 count="${FAKE_BOX_LAYER}" 2>/dev/null; }; } && \
+                   ln -f "${layer}/blob" "${dir}/blob" || { printf "%s\n" "failed=no layer could be linked"; exit 1; }
+               printf "%s\n" "member=layer"
+           fi
+           printf "%s\n" "program=${dir}/${bin}" "asset=${SELF_NAME}-image" "member=${run}" \
+               "timing=image:3000:7" "timing=image pull:3000:7" "timing=install:${CMDFOUND_BYTES:--}:11" "timing=run:-:13" ;;
+    size|reclaim)
+           [ -z "${FAKE_BOX_LOG}" ] || printf "%s\n" "${SELF_NAME} ${1}" >> "${FAKE_BOX_LOG}"
+           exit 1 ;;
+    *) exit 1 ;;
+esac

@@ -1,0 +1,467 @@
+#!/bin/sh
+#description: cmdfound channel - a catalog's programs installed and run in docker, an image each
+#usage: docker meta | docker probe CATALOG/PACKAGE VER
+#       docker obtain CATALOG/PACKAGE VER | docker size CATALOG/PACKAGE VER
+#       docker reclaim
+
+LOWER="abcdefghijklmnopqrstuvwxyz0123456789"
+HEX="0123456789abcdef"
+LABEL="io.cmdfound"
+#what a run costs before the program starts, until this machine has timed one:
+#docker creates, starts and removes a container every time
+RUN_MS="1200"
+#CMDFOUND_CHANNEL_FILE and not $0: the resolver sources this, and $0 is its own
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+#docker runs with the user's own HOME, logins and DOCKER_* (owner, 2026-09-16),
+#so its output is read through --format: no psFormat or imagesFormat reaches it
+CH="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+
+_placement() {
+    #$1 => catalog/package, $2 => version. Sets catalog, package and version
+    #    _placement alpine/figlet 2.2.5-r3  =>  0, catalog alpine, package figlet
+    #    _placement Alpine/figlet 2.2.5-r3  =>  1
+    case "${1}" in
+        ?*/?*) ;;
+        *) return 1 ;;
+    esac
+    catalog="${1%%/*}"; package="${1#*/}"; version="${2}"
+    case "${catalog}" in
+        [!${LOWER}]*|*[!${LOWER}-]*) return 1 ;;
+    esac
+    _api_is_version "${package}" || return 1
+    _api_is_version "${version}" || return 1
+    return 0
+}
+
+_image_ref() {
+    #$1 => repository[:tag][@sha256:<hex>]. Sets image_name, image_digest, image_pull
+    #    _image_ref alpine:3@sha256:<hex>  =>  0, image_name alpine:3, image_pull alpine@sha256:<hex>
+    #    _image_ref alpine:3               =>  0, image_pull empty
+    #    _image_ref -rf                    =>  1
+    _api_is_image_ref "${1}" || return 1
+    image_name="${1%%@*}"; image_digest=""; image_pull=""
+    case "${1}" in
+        *@*) image_digest="${1#*@}"
+             _util_is_digest "${image_digest}" || return 1 ;;
+    esac
+    _ir__last="${image_name##*/}"
+    [ -n "${image_digest}" ] && \
+        image_pull="${image_name%"${_ir__last}"}${_ir__last%%:*}@${image_digest}"
+    return 0
+}
+
+_daemon() {
+    #0 when docker here can build and run for this user, else prints unreachable=
+    #    _daemon  =>  0
+    #    _daemon  =>  1, unreachable=docker is not installed here
+
+    #a call that failed is made again for its stderr, its stdout read the first time
+    if ! command -v docker >/dev/null 2>&1; then
+        printf "unreachable=%s\\n" "docker is not installed here"
+        return 1
+    fi
+    if ! _dm__host="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null)"; then
+        printf "unreachable=%s\\n" "$(_util_first_line "$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>&1 >/dev/null)" \
+            "docker could not say which daemon it uses")"
+        return 1
+    fi
+    _dm__host="${_dm__host%%"${NL}"*}"
+    case "${_dm__host}" in
+        unix://?*|tcp://127.[0-9]*|tcp://localhost|tcp://localhost:*|"tcp://[::1]"|"tcp://[::1]:"*) ;;
+        *) printf "unreachable=%s\\n" "the daemon at ${_dm__host:-no endpoint docker names} does not see this machine's files"
+           return 1 ;;
+    esac
+    if ! _dm__options="$(docker info --format '{{json .SecurityOptions}}' 2>/dev/null)"; then
+        _dm__why="$(_util_first_line "$(docker info --format '{{json .SecurityOptions}}' 2>&1 >/dev/null)" \
+            "docker could not reach its daemon")"
+        case "${_dm__why}" in
+            *"permission denied"*) _dm__why="${_dm__why}: this user cannot reach the daemon, and cmdfound does not use sudo" ;;
+        esac
+        printf "unreachable=%s\\n" "${_dm__why}"
+        return 1
+    fi
+    case "${_dm__options}" in
+        *'"name=rootless'*)
+            printf "unreachable=%s\\n" "docker is rootless: files the program writes in your home would not be yours"
+            return 1 ;;
+    esac
+    return 0
+}
+
+_recorded() {
+    #$1 => a record, image id and base a tab apart. Sets recorded_id, recorded_base
+    #    _recorded "${CH}/images/alpine/figlet/2.2.5-r3"  =>  0, recorded_id sha256:<hex>,
+    #                                                         recorded_base alpine@sha256:<hex>
+    recorded_id=""; recorded_base=""
+    [ -f "${1}" ] || return 1
+    IFS="${TAB}" read -r recorded_id recorded_base < "${1}" 2>/dev/null
+    _util_is_digest "${recorded_id}"
+}
+
+_home_label() {
+    home_label="$(cd -P "${CMDFOUND_HOME:-/tmp}" 2>/dev/null && pwd)" && [ -n "${home_label}" ]
+}
+
+_pid_namespace() {
+    #sets pidns to this process's pid namespace inode, or none
+    #    /proc/self/ns/pid -> pid:[4026531836]  =>  pidns 4026531836
+    #    no /proc                               =>  pidns none
+    pidns="none"
+    _pn__link="$(readlink /proc/self/ns/pid 2>/dev/null)" || return 0
+    case "${_pn__link}" in
+        "pid:["*"]") _pn__inode="${_pn__link#pid:\[}"; _pn__inode="${_pn__inode%\]}" ;;
+        *) return 0 ;;
+    esac
+    _util_is_number "${_pn__inode}" && pidns="${_pn__inode}"
+    return 0
+}
+
+_stale_builds() {
+    #$1 => mine or all. Removes this home's stopped cmdfound-build-<pidns>-<pid> containers
+    #mine spares those of a live pid, or of another pid namespace
+    _sb__whose="${1}"
+    _sb__list="$(docker ps -a --no-trunc --filter "label=${LABEL}.home=${home_label}" \
+        --filter status=exited --filter status=created --format '{{.ID}} {{.Names}}' 2>/dev/null)" || return 1
+    while read -r _sb__id _sb__name; do
+        case "${_sb__id}" in ''|*[!${HEX}]*) continue ;; esac
+        case "${_sb__name}" in
+            cmdfound-build-?*) ;;
+            *) continue ;;
+        esac
+        if [ X"${_sb__whose}" = X"mine" ]; then
+            _sb__rest="${_sb__name#cmdfound-build-}"
+            _sb__pid="${_sb__rest##*-}"
+            [ X"${_sb__rest%-*}" = X"${pidns}" ] || continue
+            _util_is_number "${_sb__pid}" || continue
+            [ X"${_sb__pid}" != X"$$" ] && kill -0 "${_sb__pid}" 2>/dev/null && continue
+        fi
+        docker rm "${_sb__id}" >/dev/null
+    done <<EOF
+${_sb__list}
+EOF
+    return 0
+}
+
+_launcher() {
+    #$1 => launcher path, $2 => image id, $3 => program, $4 => what it is
+    _l__path="${1}"; _l__image="${2}"; _l__program="${3}"; _l__what="${4}"
+    {
+        printf "%s\\n" "#!/bin/sh" "#written by cmdfound: ${_l__what}"
+        printf '_dl__ch="%s"\n_dl__image="%s"\n_dl__program="%s"\n_dl__spec="%s"\n' \
+            "${CH}" "${_l__image}" "${_l__program}" "${SELF_NAME}:${catalog}/${package}"
+        cat <<'LAUNCHER'
+#CMDFOUND_DOCKER_FLAGS, when set, are the user's own flags for docker run,
+#split as the shell splits words - 'single', "double", back\slash - with
+#nothing expanded, and given after cmdfound's. A flag there can undo what
+#cmdfound's are for: -u (the files the program writes would not be the
+#user's), -w (where it starts), --rm (containers left behind), -i and -t
+#(stdin, or stderr kept apart from stdout), --init (Ctrl-C ending in 130),
+#--entrypoint (the program not being run) and -d (its output and status lost)
+. "${_dl__ch}/lib/confined-launch" || exit 127
+if ! _launch_sets; then
+    printf "%s\n" "cmdfound: the ids of this user could not be read, and ${_dl__program##*/} is not run without them" >&2
+    exit 127
+fi
+_dl__args="$(_launch_docker)" || exit 127
+#cmdfound's flags, then confined-launch's
+_dl__run="run --rm -i --init --log-driver=none --network=host --pull=never ${_dl__args}"
+#then the user's, split by confined-launch for the launchers of both runtimes,
+#and a quote left open runs nothing. All of it goes before the program's
+#arguments: with no word, in one set; with words, the image and the program
+#first, then each word, the last first, then cmdfound's and
+#confined-launch's flags, a set each, which none of costs more than the
+#arguments are many
+_launch_flags_read "${CMDFOUND_DOCKER_FLAGS}"
+_launch_flags_closed docker || exit 127
+if [ "${_launch_flags_left}" -eq "0" ]; then
+    eval "set -- ${_dl__run} \"\${_dl__image}\" \"\${_dl__program}\" \"\$@\""
+else
+    set -- "${_dl__image}" "${_dl__program}" "$@"
+    while _launch_prev_flag; do
+        set -- "${_launch_flag}" "$@"
+    done
+    eval "set -- ${_dl__run} \"\$@\""
+fi
+if docker image inspect --format "{{.Id}}" "${_dl__image}" >/dev/null 2>&1; then
+    exec docker "$@"
+fi
+docker "$@"
+_dl__status="$?"
+[ "${_dl__status}" -eq "125" ] || exit "${_dl__status}"
+docker image inspect --format "{{.Id}}" "${_dl__image}" >/dev/null 2>&1 && exit 125
+printf "%s\n" "cmdfound: the docker image for ${_dl__program##*/} is gone; cmdfound --latest ${_dl__spec} makes it again" >&2
+exit 127
+LAUNCHER
+    } | _util_write_aside "${_l__path}" 755
+}
+
+_undo() {
+    #obtain's EXIT trap: removes what an unfinished obtain left
+    [ -n "${ctr}" ] && docker rm -f "${ctr}" >/dev/null 2>&1
+    [ -n "${made}" ] && docker rmi "${made}" >/dev/null 2>&1
+    rm -rf "${work}"
+}
+
+_meta() {
+    printf "%s\\n" "kind=runtime" "confines=yes" "reclaims=yes"
+    exit 0
+}
+
+_probe() {
+    #$1 => catalog/package, $2 => a version
+    spec="${1}"; ver="${2}"
+    [ -n "${CMDFOUND_IMAGE}" ] || exit 1
+    _placement "${spec}" "${ver}" || exit 1
+    if [ -n "${CMDFOUND_EPHEMERAL}" ]; then
+        _api_answer_unreachable "--ephemeral does not use docker: its images would outlive the throwaway root"
+    fi
+    _image_ref "${CMDFOUND_IMAGE}" || exit 1
+    _daemon || exit 2
+
+    once=""
+    if _recorded "${CH}/images/${catalog}/${package}/${version}" && \
+       docker image inspect --format '{{.Id}}' "${recorded_id}" >/dev/null 2>&1; then
+        :
+    elif ! docker image inspect --format '{{.Id}}' "${image_pull:-${image_name}}" >/dev/null 2>&1; then
+        if [ -z "${image_pull}" ]; then
+            _api_answer_unreachable "no digest is known for ${image_name}, and docker pulls an image here only by its digest"
+        fi
+        bytes="${CMDFOUND_IMAGE_BYTES}"
+        if ! _util_is_number "${bytes}"; then
+            bytes="-"
+        else
+            _pb__f="${CH}/cache/${image_digest#sha256:}.bytes"
+            if [ ! -f "${_pb__f}" ]; then
+                _util_mkdir_p "${CH}/cache"
+                printf "%s\\n" "${bytes}" > "${_pb__f}" 2>/dev/null
+            fi
+        fi
+        once="image|${CMDFOUND_IMAGE}|${bytes}|via docker"
+    fi
+    printf "run_ms=%s\\n" "${RUN_MS}"
+    [ -z "${once}" ] || printf "once=%s\\n" "${once}"
+    exit 0
+}
+
+_obtain() {
+    #$1 => catalog/package, $2 => a version
+    spec="${1}"; ver="${2}"
+    _placement "${spec}" "${ver}" || _api_answer_failed "'${spec}' '${ver}' is not a package this channel will install"
+    _api_value_in image "${CMDFOUND_RECIPE}"; image="${_api_value_in__out}"
+    _api_value_in install "${CMDFOUND_RECIPE}"; install="${_api_value_in__out}"
+    _api_value_in bin "${CMDFOUND_RECIPE}"; program="${_api_value_in__out}"
+    [ -n "${install}" ] || _api_answer_failed "no recipe to install ${spec} with"
+    _image_ref "${image}" || _api_answer_failed "'${image}' is not an image this channel will run"
+    _api_is_program_name "${program}" || \
+        _api_answer_failed "'${program}' is not a program this channel will write a launcher for"
+    _api_is_unsafe "${CH}" && _api_answer_failed "${CH} cannot be written into a launcher safely: it has a quote, a \$, a backquote, a backslash or a newline"
+    command -v docker >/dev/null 2>&1 || _api_answer_failed "docker is not installed here"
+    lib="$(_api_launch_source)"
+    [ -f "${lib}" ] && . "${lib}" || _api_answer_failed "confined-launch is not in ${lib%/*}"
+
+    ctr=""; made=""; work="${CH}/tmp/obtain.$$"; timings=""
+    _util_trap_exit '_undo'
+    _util_mkdir_p "${work}" && _util_mkdir_p "${CH}/lib" || _api_answer_failed "${CH} could not be written"
+    _home_label || _api_answer_failed "${CMDFOUND_HOME} cannot be named"
+    _pid_namespace
+    _stale_builds mine
+
+    record="${CH}/images/${catalog}/${package}/${version}"
+    id=""
+    if _recorded "${record}" && docker image inspect --format '{{.Id}}' "${recorded_id}" >/dev/null 2>&1; then
+        id="${recorded_id}"
+    fi
+
+    if [ -z "${id}" ]; then
+        base="${image_pull:-${image_name}}"
+        base_id="$(docker image inspect --format '{{.Id}}' "${base}" 2>/dev/null)" || base_id=""
+        if ! _util_is_digest "${base_id}"; then
+            [ -n "${image_pull}" ] || _api_answer_failed "no digest is known for ${image_name}, and docker pulls an image here only by its digest"
+            t0="$(_util_now_ms)"
+            docker pull "${image_pull}" >&2 || _api_answer_failed "docker could not pull ${image_pull}"
+            bytes="-"
+            [ -f "${CH}/cache/${image_digest#sha256:}.bytes" ] && \
+                read -r bytes 2>/dev/null < "${CH}/cache/${image_digest#sha256:}.bytes"
+            _util_is_number "${bytes}" || bytes="-"
+            timings="${timings}timing=image:${bytes}:$(( $(_util_now_ms) - t0 ))${NL}"
+            _util_mkdir_p "${CH}/pulled" && _util_mkdir_p "${CH}/cache" && \
+                printf "%s\\n" "${image_pull}" > "${CH}/cache/pulled.$$" && \
+                mv "${CH}/cache/pulled.$$" "${CH}/pulled/${image_digest#sha256:}" || \
+                rm -f "${CH}/cache/pulled.$$"
+            base_id="$(docker image inspect --format '{{.Id}}' "${image_pull}" 2>/dev/null)"
+            _util_is_digest "${base_id}" || _api_answer_failed "docker pulled ${image_pull} and does not have it"
+        fi
+
+        #a file and not -e: a commit would keep a proxy's password in the image
+        eval "set -- $(_build_network)"
+        ca="${1}"; shift
+        cadir="${CONFINED_CA%/*}"; files="${work}/${cadir##*/}"
+        _util_mkdir_p "${files}" || _api_answer_failed "${work} could not be written"
+        (
+            umask 077
+            while [ "${#}" -gt "0" ]; do
+                [ X"${1}" = X"-e" ] && [ "${#}" -gt "1" ] || { shift; continue; }
+                shift
+                case "${1}" in
+                    *=*) name="${1%%=*}"; value="${1#*=}" ;;
+                    *) name="${1}"; eval "value=\"\${${1}}\"" ;;
+                esac
+                _launch_out=""; _launch_word "${value}"
+                printf "%s=%s\n" "${name}" "${_launch_out% }"
+                shift
+            done > "${files}/net.env"
+        ) || _api_answer_failed "the network settings could not be written for the build"
+        printf "%s\n" "set -a" ". ${cadir}/net.env" "set +a" "rm -f ${cadir}/net.env" \
+            "${install}" 'status=$?' "rm -rf ${cadir}" 'exit ${status}' > "${files}/build" && \
+            { [ -z "${ca}" ] || cp "${ca}" "${files}/${CONFINED_CA##*/}"; } || \
+            _api_answer_failed "the build of ${package} ${version} could not be written"
+        #--entrypoint "" here: a commit cannot clear it
+        t0="$(_util_now_ms)"
+        ctr="$(docker create --name "cmdfound-build-${pidns}-$$" \
+            --label "${LABEL}.home=${home_label}" --label "${LABEL}.catalog=${catalog}" \
+            --label "${LABEL}.package=${package}" --label "${LABEL}.version=${version}" \
+            --network=host --pull=never --user=0:0 --entrypoint "" "${base_id}" \
+            /bin/sh "${cadir}/build")" || ctr=""
+        case "${ctr}" in
+            ''|*[!${HEX}]*) ctr=""; _api_answer_failed "docker could not make a container to install ${package} ${version} in" ;;
+        esac
+        docker cp "${files}" "${ctr}:${cadir%/*}/" >&2 || \
+            _api_answer_failed "the build of ${package} ${version} could not be copied into its container"
+        rm -rf "${files}"
+        #start -a may answer 0 mid-install: docker wait says how it ended
+        docker start -a "${ctr}" >&2
+        status="$(docker wait "${ctr}" 2>/dev/null)" || status=""
+        _util_is_number "${status}" || _api_answer_failed "docker could not say how installing ${package} ${version} ended"
+        [ "${status}" -eq "0" ] || _api_answer_failed "installing ${package} ${version} in ${image_name} ended with status ${status}"
+        #a docker tag cannot hold a +
+        _util_replace_in "${package}-${version}" "+" "_"
+        made="$(docker commit --change 'CMD ["/bin/sh"]' "${ctr}" "cmdfound/${catalog}:${_util_replace_in__out}")" || made=""
+        _util_is_digest "${made}" || { made=""; _api_answer_failed "docker could not keep ${package} ${version} as an image"; }
+        docker rm -f "${ctr}" >/dev/null 2>&1 && ctr=""
+        bytes="${CMDFOUND_BYTES:--}"
+        _util_is_number "${bytes}" || bytes="-"
+        timings="${timings}timing=install:${bytes}:$(( $(_util_now_ms) - t0 ))${NL}"
+        id="${made}"
+    fi
+
+    _util_write_aside "${CH}/lib/confined-launch" < "${lib}" || \
+        _api_answer_failed "confined-launch could not be copied into ${CH}/lib"
+    _launcher "${work}/check" "${id}" /bin/sh "whether ${program} is in the image" || _api_answer_failed "no launcher could be written"
+    t0="$(_util_now_ms)"
+    found="$(unset CMDFOUND_DOCKER_FLAGS; cd /tmp && "${work}/check" -c "command -v ${program}" < /dev/null)"
+    status="${?}"
+    [ "${status}" -eq "0" ] && [ -n "${found}" ] || _api_answer_failed "${package} installed no program called ${program}"
+    timings="${timings}timing=run:-:$(( $(_util_now_ms) - t0 ))${NL}"
+
+    run="run/${catalog}/${package}/${version}"
+    _util_mkdir_p "${CH}/${run}" && \
+        _launcher "${CH}/${run}/${program}" "${id}" "${program}" "${program}, ${catalog}'s ${package} ${version}, run in docker" || \
+        _api_answer_failed "no launcher could be written"
+    if [ -n "${made}" ]; then
+        _util_mkdir_p "${record%/*}" && printf "%s\\t%s\\n" "${made}" "${base}" | _util_write_aside "${record}" || \
+            _api_answer_failed "the image of ${package} ${version} could not be recorded"
+        made=""
+    fi
+
+    printf "%s\\n" "program=${CH}/${run}/${program}" "asset=${id}" \
+        "member=${run}" "member=images/${catalog}/${package}/${version}"
+    printf "%s" "${timings}"
+    exit 0
+}
+
+_size() {
+    #$1 => catalog/package, $2 => a version
+    spec="${1}"; ver="${2}"
+    _placement "${spec}" "${ver}" || exit 1
+    if ! _recorded "${CH}/images/${catalog}/${package}/${version}"; then
+        _api_answer_unreachable "no image of ${package} ${version} is recorded"
+    fi
+    command -v docker >/dev/null 2>&1 || _api_answer_unreachable "docker is not installed here"
+    if ! sizes="$(docker image inspect --format '{{.Size}} {{.Parent}}' "${recorded_id}" 2>/dev/null)"; then
+        _api_answer_unreachable "docker does not have the image of ${package} ${version}"
+    fi
+    bytes="${sizes%% *}"; parent="${sizes#* }"
+    [ -n "${parent}" ] || parent="${recorded_base}"
+    base_bytes=""
+    [ -n "${parent}" ] && base_bytes="$(docker image inspect --format '{{.Size}}' "${parent}" 2>/dev/null)"
+    case "${bytes}:${base_bytes}" in
+        *[!0-9:]*|:*|*:)
+            printf "unreachable=%s\\n" "what the image of ${package} ${version} holds beyond the one it was built from is not known"
+            exit 2 ;;
+    esac
+    bytes="$((bytes - base_bytes))"
+    [ "${bytes}" -ge "0" ] || bytes="0"
+    printf "bytes=%s\\n" "${bytes}"
+    exit 0
+}
+
+_reclaim() {
+    _daemon || exit 2
+    _home_label || _api_answer_unreachable "${CMDFOUND_HOME} cannot be named"
+    named=" "; bases=" "
+    if [ X"${CMDFOUND_RECLAIM}" != X"all" ]; then
+        for f in "${CH}"/images/*/*/*; do
+            _recorded "${f}" || continue
+            named="${named}${recorded_id} "; bases="${bases}${recorded_base} "
+        done
+    fi
+    freed="0"
+
+    if ! _stale_builds all; then
+        _api_answer_unreachable "docker could not list the containers of this home"
+    fi
+
+    if ! images="$(docker image ls -a --no-trunc --filter "label=${LABEL}.home=${home_label}" \
+            --format '{{.ID}}' 2>/dev/null)"; then
+        _api_answer_unreachable "docker could not list the images of this home"
+    fi
+    seen=" "
+    for i in ${images}; do
+        _util_is_digest "${i}" || continue
+        case "${named}${seen}" in *" ${i} "*) continue ;; esac
+        seen="${seen}${i} "
+        sizes="$(docker image inspect --format '{{.Size}} {{.Parent}}' "${i}" 2>/dev/null)" || sizes=""
+        bytes="${sizes%% *}"; parent="${sizes#* }"; base_bytes=""
+        [ -n "${parent}" ] && base_bytes="$(docker image inspect --format '{{.Size}}' "${parent}" 2>/dev/null)"
+        docker rmi "${i}" >/dev/null || continue
+        case "${bytes}:${base_bytes}:${freed}" in
+            *[!0-9:]*|:*|*::*) freed="-" ;;
+            *) [ "${bytes}" -gt "${base_bytes}" ] && freed="$((freed + bytes - base_bytes))" ;;
+        esac
+    done
+
+    for f in "${CH}"/pulled/*; do
+        [ -f "${f}" ] || continue
+        hex="${f##*/}"; ref=""
+        read -r ref 2>/dev/null < "${f}"
+        case "${bases}" in *"@sha256:${hex} "*) continue ;; esac
+        case "${ref}" in
+            *"@sha256:${hex}") _image_ref "${ref}" || { rm -f "${f}"; continue; } ;;
+            *) rm -f "${f}"; continue ;;
+        esac
+        if ! sizes="$(docker image inspect --format '{{.Id}} {{.Size}}' "${ref}" 2>/dev/null)"; then
+            rm -f "${f}"
+            continue
+        fi
+        docker rmi "${ref}" >/dev/null || continue
+        rm -f "${f}"
+        #an image another name still holds freed nothing
+        docker image inspect --format '{{.Id}}' "${sizes%% *}" >/dev/null 2>&1 && continue
+        case "${sizes#* }:${freed}" in
+            *[!0-9:]*|:*|*:) freed="-" ;;
+            *) freed="$((freed + ${sizes#* }))" ;;
+        esac
+    done
+    [ X"${freed}" = X"-" ] || printf "freed=%s\\n" "${freed}"
+    exit 0
+}
+
+case "${1}" in
+    meta)    _meta ;;
+    probe)   _probe "${2}" "${3}" ;;
+    obtain)  _obtain "${2}" "${3}" ;;
+    size)    _size "${2}" "${3}" ;;
+    reclaim) _reclaim ;;
+    *) printf "%s\\n" "usage: ${SELF_NAME} meta|probe|obtain|size|reclaim" >&2; exit 1 ;;
+esac

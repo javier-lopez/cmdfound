@@ -1,0 +1,53 @@
+#!/bin/sh
+#a catalog whose programs run inside an image, so that it is never a path by
+#itself: each runtime here is one. It is always here, with nothing to fetch,
+#and has fcname, whose package has a second program, fcname-extra, and fcamb,
+#a command two of its packages give. Its recipe is what a runtime installs a
+#package with, and names the program to run. It only answers names that start
+#with "fc", so no other test ever waits on it. FAKE_CAT_SIZELESS, when set,
+#makes it a catalog that cannot say what a package weighs; FAKE_CAT_INDEX, one
+#that has to be fetched before it can answer, and says what that cost, or
+#sizeless, one that cannot say
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+h="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+image="fake.invalid/base:1@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+case "${1}" in
+    meta)  printf "%s\n" "kind=catalog" "confines=yes" "describes=environment" ;;
+    index) [ -n "${FAKE_CAT_INDEX}" ] || exit 1
+           if [ X"${2}" = X"bytes" ]; then
+               [ X"${FAKE_CAT_INDEX}" = X"sizeless" ] || printf "%s\n" "bytes=7000"
+               exit 0
+           fi
+           mkdir -p "${h}/index" && : > "${h}/index/names"
+           printf "%s\n" "packages=3"
+           [ X"${FAKE_CAT_INDEX}" = X"sizeless" ] || printf "%s\n" "bytes=7000" ;;
+    probe) [ -z "${FAKE_CAT_INDEX}" ] || [ -f "${h}/index/names" ] || {
+               printf "%s\n" "unreachable=no local catalog yet" "needs=index"; exit 2; }
+           case "${2}" in
+               fcamb) printf "%s\n" "candidate=fcamb-left" "candidate=fcamb-right"; exit 3 ;;
+               fcname|fcamb-left|fcamb-right) ;;
+               *) exit 1 ;;
+           esac
+           [ -z "${3}" ] || [ X"${3}" = X"1.0-r0" ] || exit 1
+           [ -n "${FAKE_CAT_SIZELESS}" ] || printf "%s\n" "bytes=5000"
+           printf "%s\n" "version=1.0-r0" "estimate=yes" "package=${2}" \
+               "image=${image}" "image_bytes=3000" ;;
+    recipe)
+           [ X"${3}" = X"1.0-r0" ] || exit 1
+           #the program asked for when the package has it, else the only one
+           #the package has, else the user is to say which
+           case "${2}:${4}" in
+               fcname:fcname|fcname:fcname-extra) bin="${4}" ;;
+               fcname:*) printf "%s\n" "failed=fcname has no program called ${4}, it has fcname and fcname-extra; name one with --bin"
+                         exit 1 ;;
+               fcamb-left:*|fcamb-right:*) bin="fcamb" ;;
+               *) exit 1 ;;
+           esac
+           printf "%s\n" "image=${image}" "install=fakeapk add ${2}=${3}" "bin=${bin}" ;;
+    *) exit 1 ;;
+esac

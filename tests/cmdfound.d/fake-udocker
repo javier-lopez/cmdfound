@@ -1,0 +1,257 @@
+#!/bin/sh
+#a stand-in for udocker 1.3.17: the maincmd.py of the fake sdist the udocker
+#tests build, which fake-python3 runs with sh. It keeps udocker's layout and the
+#behaviour of it that the channel depends on, so what the channel gets wrong
+#shows up here as it would there:
+#
+#  - the repository is UDOCKER_DIR, or ~/.udocker without it, and ~/.udocker is
+#    made as well when UDOCKER_KEYSTORE is not an absolute path
+#  - every command but version and install installs the engines first when
+#    they are missing: from UDOCKER_TARBALL when it is set, and from the default
+#    when it is not; set and empty, installing is skipped
+#  - pull takes repository:tag, a digest as the tag; repository@digest only for
+#    a name with no / and no . in it, as 1.3.17's check allows
+#  - create prints the id of the container on stdout, run ends a Ctrl-C with 1
+#  - run makes, in the container, an empty directory with no permissions for
+#    each directory -v mounts, as proot does, and removes them when the program
+#    ends; a Ctrl-C leaves them, as proot killed by udocker after one does
+#  - run starts in -w, or, with none, in the home --user has in this machine's
+#    passwd, which has to be in the container: the fake images carry no
+#    WorkingDir, as an image built from scratch or imported does not
+#  - run takes any other long option, as a flag of its own, and does nothing
+#    with it
+#  - run gives the program only what -e names, NAME=VALUE as written and NAME
+#    from udocker's own environment, starts it in -w, and runs /bin/sh as the
+#    host's with the container's bin first on PATH
+#
+#Images are directories in FAKE_UDOCKER_REGISTRY, <repository>/<tag>/rootfs.tar.gz,
+#and the engines are FAKE_UDOCKER_ENGINES, a tar.gz with udocker_dir/lib/VERSION.
+#FAKE_UDOCKER_LOG, when set, is where each call writes one line: the command,
+#its arguments, and the variables the channel is to set, keep or remove, each
+#as NAME=value or NAME unset. A pull copies the keystore it found beside the
+#log, as <log>.keystore, with its mode in the line. That line joins the
+#arguments with spaces; FAKE_UDOCKER_ARGV, when set, is where each call writes
+#them apart, as fake-docker does: every argument in <>, a newline in one shown
+#as \n, the options before the command included
+
+NL="
+"
+version="${FAKE_UDOCKER_VERSION:-9.9.9}"
+release="1.2.11"
+
+if [ -n "${FAKE_UDOCKER_ARGV}" ]; then
+    _argv=""
+    for _a in "${@}"; do
+        while :; do
+            case "${_a}" in
+                *"${NL}"*) _a="${_a%%"${NL}"*}\\n${_a#*"${NL}"}" ;;
+                *) break ;;
+            esac
+        done
+        _argv="${_argv} <${_a}>"
+    done
+    printf "%s\n" "${_argv# }" >> "${FAKE_UDOCKER_ARGV}"
+fi
+
+allow_root=""; quiet=""
+while :; do
+    case "${1}" in
+        --allow-root) allow_root="1"; shift ;;
+        --quiet|-q) quiet="1"; shift ;;
+        -*) printf "%s\n" "Error: invalid option: ${1}" >&2; exit 1 ;;
+        *) break ;;
+    esac
+done
+command="${1}"; [ "${#}" -gt "0" ] && shift
+
+_is() {
+    eval "_is__set=\"\${${1}+x}\" _is__value=\"\${${1}}\""
+    if [ -n "${_is__set}" ]; then printf " %s=%s" "${1}" "${_is__value}"; else printf " %s unset" "${1}"; fi
+}
+
+if [ -n "${FAKE_UDOCKER_LOG}" ]; then
+    {
+        printf "%s" "${command} ${*} |"
+        for v in HOME XDG_CONFIG_HOME CURL_HOME UDOCKER_DIR UDOCKER_KEYSTORE UDOCKER_TMP XDG_RUNTIME_DIR \
+                 UDOCKER_TARBALL UDOCKER_LOGLEVEL UDOCKER_BIN UDOCKER_LIB UDOCKER_DOC UDOCKER_REPOS \
+                 UDOCKER_LAYERS UDOCKER_CONTAINERS PROOT_TMP_DIR http_proxy SSL_CERT_FILE; do
+            _is "${v}"
+        done
+        printf " quiet=%s allow_root=%s path=%s\n" "${quiet:-0}" "${allow_root:-0}" "${PATH%%:*}"
+    } >> "${FAKE_UDOCKER_LOG}"
+fi
+
+if [ X"$(id -u)" = X"0" ] && [ -z "${allow_root}" ]; then
+    printf "%s\n" "Error: do not run as root !" >&2
+    exit 1
+fi
+
+topdir="${UDOCKER_DIR:-${HOME}/.udocker}"
+case "${UDOCKER_KEYSTORE}" in
+    /*) ;;
+    *) mkdir -p "${HOME}/.udocker" ;;
+esac
+mkdir -p "${topdir}/repos" "${topdir}/layers" "${topdir}/containers" "${topdir}/bin" "${topdir}/lib" "${topdir}/doc" || exit 1
+
+_install() {
+    [ X"$(cat "${topdir}/lib/VERSION" 2>/dev/null)" = X"${release}" ] && return 0
+    tarball="${UDOCKER_TARBALL-${FAKE_UDOCKER_ENGINES}}"
+    [ -n "${tarball}" ] || return 0
+    printf "%s\n" "Info: installing udockertools ${release}"
+    case "${tarball%% *}" in
+        /*) ;;
+        *) printf "%s\n" "Error: installation of udockertools failed" >&2; return 1 ;;
+    esac
+    [ -z "${FAKE_UDOCKER_LOG}" ] || printf "%s\n" "installed from ${tarball%% *}" >> "${FAKE_UDOCKER_LOG}"
+    rm -rf "${topdir}/engines.tmp" && mkdir -p "${topdir}/engines.tmp" && \
+        tar -xzf "${tarball%% *}" -C "${topdir}/engines.tmp" && \
+        cp -R "${topdir}/engines.tmp/udocker_dir/lib/." "${topdir}/lib/" && \
+        cp -R "${topdir}/engines.tmp/udocker_dir/bin/." "${topdir}/bin/"
+    rc="${?}"
+    rm -rf "${topdir}/engines.tmp"
+    return "${rc}"
+}
+
+_spec() {
+    #$1 => an image as udocker takes it. Sets repo and tag, or answers 1 as
+    #udocker's check does
+    case "${1}" in
+        *@*) repo="${1%%@*}"; tag="${1#*@}"
+             case "${repo}" in
+                 */*|*.*|'') printf "%s\n" "Error: must specify image:tag or repository/image:tag" >&2; return 1 ;;
+             esac ;;
+        *:*) repo="${1%%:*}"; tag="${1#*:}" ;;
+        *)   repo="${1}"; tag="latest" ;;
+    esac
+    return 0
+}
+
+case "${command}" in
+    version)
+        printf "%s\n" "version: ${version}" "tarball: ${UDOCKER_TARBALL-${FAKE_UDOCKER_ENGINES}}" "tarball_release: ${release}"
+        exit 0 ;;
+    install)
+        _install
+        exit "${?}" ;;
+esac
+
+_install || exit 1
+
+case "${command}" in
+    pull)
+        if [ -n "${FAKE_UDOCKER_LOG}" ]; then
+            if [ -f "${UDOCKER_KEYSTORE}" ]; then
+                cp "${UDOCKER_KEYSTORE}" "${FAKE_UDOCKER_LOG}.keystore"
+                printf "%s\n" "keystore $(ls -ln "${UDOCKER_KEYSTORE}" | awk '{print $1}')" >> "${FAKE_UDOCKER_LOG}"
+            else
+                rm -f "${FAKE_UDOCKER_LOG}.keystore"
+                printf "%s\n" "keystore absent" >> "${FAKE_UDOCKER_LOG}"
+            fi
+        fi
+        _spec "${1}" || exit 1
+        src="${FAKE_UDOCKER_REGISTRY}/${repo}/${tag}/rootfs.tar.gz"
+        if [ ! -f "${src}" ]; then
+            printf "%s\n" "Error: manifest not found or not authorized" "Error: no files downloaded" >&2
+            exit 1
+        fi
+        [ -n "${quiet}" ] || printf "%s\n" "Info: downloading layer ${tag}"
+        layer="${topdir}/layers/${tag}.rootfs"
+        mkdir -p "${topdir}/repos/${repo}/${tag}" && cp "${src}" "${layer}" && \
+            printf '{"layers":[{"digest":"%s","size":%s}]}' "${tag}" "$(wc -c < "${src}" | awk '{print $1}')" \
+                > "${topdir}/repos/${repo}/${tag}/manifest" && \
+            : > "${topdir}/repos/${repo}/${tag}/v2" && \
+            ln -sf "${layer}" "${topdir}/repos/${repo}/${tag}/${tag}.rootfs" && \
+            printf "%s" "${topdir}/repos/${repo}:${tag}" > "${topdir}/repos/${repo}/${tag}/TAG" || exit 1
+        exit 0 ;;
+    create)
+        _spec "${1}" || exit 1
+        [ -f "${topdir}/repos/${repo}/${tag}/TAG" ] || { printf "%s\n" "Error: image or container not available" >&2; exit 1; }
+        n="$(( $(cat "${topdir}/count" 2>/dev/null || printf 0) + 1 ))"; printf "%s\n" "${n}" > "${topdir}/count"
+        id="f${n}a-0000-4000-8000-00000000000${n}"
+        mkdir -p "${topdir}/containers/${id}/ROOT" && \
+            tar -xzf "${topdir}/layers/${tag}.rootfs" -C "${topdir}/containers/${id}/ROOT" && \
+            printf "%s" "${repo}:${tag}" > "${topdir}/containers/${id}/imagerepo.name" || exit 1
+        printf "%s\n" "${id}"
+        exit 0 ;;
+    setup)
+        mode=""
+        while :; do
+            case "${1}" in
+                --execmode=*) mode="${1#--execmode=}"; shift ;;
+                *) break ;;
+            esac
+        done
+        [ -d "${topdir}/containers/${1}/ROOT" ] || { printf "%s\n" "Error: invalid container id" >&2; exit 1; }
+        printf "%s\n" "${mode}" > "${topdir}/containers/${1}/execmode"
+        exit 0 ;;
+    rmi)
+        _spec "${1}" || exit 1
+        if [ ! -f "${topdir}/repos/${repo}/${tag}/TAG" ]; then
+            printf "%s\n" "Error: deleting image" >&2
+            exit 1
+        fi
+        rm -rf "${topdir}/repos/${repo}/${tag}" "${topdir}/layers/${tag}.rootfs"
+        exit 0 ;;
+    run)
+        workdir=""; envs=""; user=""; vols=""
+        while :; do
+            case "${1}" in
+                --nobanner|--hostauth) shift ;;
+                --user=*) user="${1#--user=}"; shift ;;
+                -v) [ -e "${2}" ] || { printf "%s\n" "Error: invalid host volume path: ${2}" >&2; exit 1; }
+                    [ -d "${2}" ] && vols="${vols}${vols:+
+}${2}"
+                    shift 2 ;;
+                -w) workdir="${2}"; shift 2 ;;
+                -e) envs="${envs}${envs:+
+}${2}"; shift 2 ;;
+                --*) shift ;;
+                -*) printf "%s\n" "Error: invalid run option: ${1}" >&2; exit 1 ;;
+                *) break ;;
+            esac
+        done
+        id="${1}"; shift
+        root="${topdir}/containers/${id}/ROOT"
+        [ -d "${root}" ] || { printf "%s\n" "Error: invalid container id" >&2; exit 1; }
+        if [ -z "${workdir}" ]; then
+            case "${user}" in
+                ''|root|0) home="/root" ;;
+                *) home="$(awk -F: -v u="${user}" '$3 == u || $1 == u {print $6; exit}' /etc/passwd)" ;;
+            esac
+            [ -d "${root}${home:-/}" ] || { printf "%s\n" "Error: invalid working directory:  ${home}" >&2; exit 1; }
+            workdir="${root}${home:-/}"
+        fi
+        program="${1}"; shift
+        case "${program}" in
+            /bin/sh) ;;
+            /*) program="${root}${program}" ;;
+            *) if [ -x "${root}/usr/bin/${program}" ]; then program="${root}/usr/bin/${program}"; else program="${root}/bin/${program}"; fi ;;
+        esac
+        set -f; IFS="
+"
+        set -- env -i "PATH=${root}/usr/bin:${root}/bin:/usr/bin:/bin" "FAKE_ROOT=${root}" "FAKE_UDOCKER_LOG=${FAKE_UDOCKER_LOG}" $(
+            for e in ${envs}; do
+                case "${e}" in
+                    *=*) printf "%s\n" "${e}" ;;
+                    *) eval "s=\"\${${e}+x}\" v=\"\${${e}}\""; [ -n "${s}" ] && printf "%s\n" "${e}=${v}" ;;
+                esac
+            done) "${program}" "${@}"
+        made=""
+        for v in ${vols}; do
+            [ -e "${root}${v}" ] && continue
+            mkdir -p "${root}${v}" && chmod 000 "${root}${v}" && made="${made}${made:+
+}${root}${v}"
+        done
+        set +f; unset IFS
+        [ -z "${workdir}" ] || cd "${workdir}" || exit 1
+        trap 'exit 1' INT
+        "${@}"
+        rc="${?}"
+        set -f; IFS="
+"
+        for v in ${made}; do rmdir "${v}"; done
+        exit "${rc}" ;;
+    *)
+        printf "%s\n" "Error: invalid command: ${command}" >&2
+        exit 1 ;;
+esac

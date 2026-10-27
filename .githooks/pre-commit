@@ -1,0 +1,15 @@
+#!/bin/sh
+#rebuilds cmdfound from what is about to be committed and stages it, so the
+#published script is never behind its source. Turned on once a clone with:
+#    git config core.hooksPath .githooks
+
+top="$(git rev-parse --show-toplevel)" || exit 1
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/cmdfound-build.XXXXXX")" || exit 1
+trap 'rm -rf "${tmp}"' EXIT HUP INT TERM
+
+#the index and not the working tree: a commit of part of the changes gets the
+#cmdfound of that part
+git checkout-index --all --prefix="${tmp}/" || exit 1
+sh "${tmp}/build" || exit 1
+cp "${tmp}/cmdfound" "${top}/cmdfound" && chmod 755 "${top}/cmdfound" || exit 1
+git add "${top}/cmdfound"

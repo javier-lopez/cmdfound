@@ -1,0 +1,12 @@
+#!/bin/sh
+#a channel whose probe dies instead of answering. Asked about crashname it
+#calls a program that is not here and ends at 127, which no contract covers
+#and which is no answer at all; asked about anything else it answers 1, the no
+#that must stay silent. Nothing else here is ever asked about either name
+
+case "${1}" in
+    meta)  printf "%s\n" "kind=artifact" "confines=no" "describes=self" ;;
+    probe) [ X"${2}" = X"crashname" ] || exit 1
+           cmdfound-no-such-program-is-here ;;
+    *) exit 1 ;;
+esac

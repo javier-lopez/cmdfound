@@ -1,0 +1,3 @@
+#description: void - Void Linux, glibc and musl, xbps
+#decided: 2026-10-26
+#why: its only command map is xlocate, a git repository outside the package index, unsigned and for glibc only (research/distros)

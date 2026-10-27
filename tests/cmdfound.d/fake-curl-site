@@ -1,0 +1,86 @@
+#!/bin/sh
+#a stand-in for curl, for the cmdfound tests, serving https://HOST/PATH from
+#FAKE_CURL_SITE/HOST/PATH the way github and a cdn answer: a file there is a
+#redirect and then a 200 with its length, and a file that is not there is a
+#404 whose page is nine bytes long. A file PATH.302 holding a url is a redirect
+#to it, the way github answers releases/latest, followed only with -L. It
+#answers only what a channel asks:
+#
+#  -o FILE URL      the body into FILE, and without -o to stdout
+#  -D FILE          the headers into FILE as well
+#  -I URL...        the headers of each, one block per answer, -I alone
+#                   or among other letters, as in -sSIL
+#
+#and after each url whatever -w says, with %{http_code} filled in. Like curl,
+#it reads ~/.curlrc first unless -q is its first argument; there, head asks
+#for the headers alone and include writes them into the body as well.
+#-K - reads the configuration curl reads from stdin, and FAKE_CURL_SITE_CONFIG,
+#when set, records it, as FAKE_CURL_SITE_ARGV records the arguments.
+#FAKE_CURL_SITE_DOWN=1 answers as a host that cannot be reached, and
+#FAKE_CURL_SITE_LOG, when set, records each url asked for, and a body sent to
+#stdout whole, which a reader that stopped reading does not get
+
+head=""; include=""; out=""; wout=""; urls=""; dump=""; follow=""
+[ -n "${FAKE_CURL_SITE_ARGV}" ] && printf "%s\n" "${*}" >> "${FAKE_CURL_SITE_ARGV}"
+if [ X"${1}" != X"-q" ] && [ -f "${HOME}/.curlrc" ]; then
+    grep -x 'head' "${HOME}/.curlrc" >/dev/null && head="1"
+    grep -x 'include' "${HOME}/.curlrc" >/dev/null && include="1"
+fi
+while [ "${#}" -gt "0" ]; do
+    case "${1}" in
+        -o) shift; out="${1}" ;;
+        -D) shift; dump="${1}" ;;
+        -K) shift; if [ X"${1}" = X"-" ]; then
+                       if [ -n "${FAKE_CURL_SITE_CONFIG}" ]; then cat >> "${FAKE_CURL_SITE_CONFIG}"; else cat > /dev/null; fi
+                   fi ;;
+        -w) shift; wout="${1}" ;;
+        -I|-[!-]*I*) head="1"; case "${1}" in *L*) follow="1" ;; esac ;;
+        -L|-[!-]*L*) follow="1" ;;
+        -*) ;;
+        *) urls="${urls} ${1}" ;;
+    esac
+    shift
+done
+
+rc="0"
+for url in ${urls}; do
+    [ -n "${FAKE_CURL_SITE_LOG}" ] && printf "%s\n" "${url}" >> "${FAKE_CURL_SITE_LOG}"
+    f="${FAKE_CURL_SITE}/${url#https://}"
+    if [ -n "${FAKE_CURL_SITE_DOWN}" ]; then
+        code="000"; headers=""; rc="7"
+    elif [ -f "${f}.302" ]; then
+        IFS= read -r location < "${f}.302"
+        code="302"
+        headers="$(printf 'HTTP/2 302\r\ncontent-length: 0\r\nlocation: %s\r\n\r' "${location}")"
+        if [ -n "${follow}" ]; then
+            f="${FAKE_CURL_SITE}/${location#https://}"; code="404"
+            [ -f "${f}" ] && code="200"
+            headers="${headers}
+$(printf 'HTTP/2 %s\r\ncontent-length: %s\r\n\r' "${code}" "$([ -f "${f}" ] && wc -c < "${f}" | awk '{print $1}' || echo 9)")"
+        fi
+    elif [ -f "${f}" ]; then
+        code="200"
+        headers="$(printf 'HTTP/2 302\r\ncontent-length: 0\r\nlocation: https://objects.invalid/%s\r\n\r\nHTTP/2 200\r\ncontent-length: %s\r\n\r' \
+            "${url##*/}" "$(wc -c < "${f}" | awk '{print $1}')")"
+    else
+        code="404"
+        headers="$(printf 'HTTP/2 404\r\ncontent-length: 9\r\n\r')"
+    fi
+    [ -n "${dump}" ] && [ -n "${headers}" ] && printf "%s\n" "${headers}" > "${dump}"
+    if [ -n "${head}" ]; then
+        [ -n "${headers}" ] && printf "%s\n" "${headers}"
+        [ -n "${out}" ] && : > "${out}"
+    elif [ -n "${out}" ] && [ X"${code}" != X"000" ]; then
+        { [ -n "${include}" ] && printf "%s\n" "${headers}"
+          if [ X"${code}" = X"200" ]; then cat "${f}"; else printf "%s" "Not Found"; fi; } > "${out}"
+    elif [ -z "${out}" ] && [ X"${code}" != X"000" ]; then
+        [ -n "${include}" ] && printf "%s\n" "${headers}"
+        if [ X"${code}" = X"200" ]; then
+            cat "${f}" && [ -n "${FAKE_CURL_SITE_LOG}" ] && printf "%s\n" "served ${url}" >> "${FAKE_CURL_SITE_LOG}"
+        else
+            printf "%s" "Not Found"
+        fi
+    fi
+    [ -n "${wout}" ] && printf "%b" "$(printf "%s" "${wout}" | sed "s/%{http_code}/${code}/g")"
+done
+exit "${rc}"

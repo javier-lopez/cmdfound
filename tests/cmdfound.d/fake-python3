@@ -1,0 +1,26 @@
+#!/bin/sh
+#a stand-in for python3, copied as python3 wherever a test runs udocker's
+#channel. It takes what that channel hands python3 - its options and the path
+#of udocker's maincmd.py - and runs the path with sh, since the maincmd.py of
+#the fake sdist is fake-udocker, a shell script. Like python running udocker,
+#it finds the package from the path as it is written and follows no link:
+#maincmd.py adds the directory above its own to sys.path, and a maincmd.py
+#reached through tool/current finds no udocker there. FAKE_PYTHON_LOG, when
+#set, is where it writes the options and path it was given
+
+[ -z "${FAKE_PYTHON_LOG}" ] || printf "%s\n" "python3 ${*}" >> "${FAKE_PYTHON_LOG}"
+while :; do
+    case "${1}" in
+        -E|-s) shift ;;
+        -*) printf "%s\n" "fake python3: ${1} is not an option the udocker channel uses" >&2; exit 2 ;;
+        *) break ;;
+    esac
+done
+script="${1}"
+[ -f "${script}" ] || { printf "%s\n" "python3: can't open file '${script}'" >&2; exit 2; }
+if [ ! -f "${script%/*}/../udocker/maincmd.py" ]; then
+    printf "%s\n" "ModuleNotFoundError: No module named 'udocker'" >&2
+    exit 1
+fi
+shift
+exec sh "${script}" "${@}"
