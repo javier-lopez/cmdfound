@@ -1,3 +1,4 @@
+#!/bin/sh
 #a stand-in for date, for the cmdfound tests, copied as date where a test needs
 #a clock that cannot say nanoseconds. It answers %N the way busybox's date
 #does - musl's strftime drops the conversion without a word, so +%s%N comes

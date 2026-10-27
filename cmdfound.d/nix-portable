@@ -15,6 +15,8 @@ SELF_NAME="${SELF##*/}"
 CH="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
 INDEX="${CH}/index/programs.tsv"
 RELEASE="${CH}/index/release"
+#every store path of the release, what a size is asked of nix by
+STORE_PATHS="${CH}/index/store-paths.xz"
 NP="${CH}/.nix-portable"
 TOOL_SPEC="github:DavHau/nix-portable"
 
@@ -60,6 +62,23 @@ _release_of() {
     fi
     _api_is_version "${_ro__release}" || return 1
     printf "%s\\n%s\\n" "${_ro__release}" "${_ro__url}"
+}
+
+_store_paths() {
+    #$1 => the release's nixexprs.tar.xz. Its store-paths.xz beside it, kept
+    #for _download_bytes; a release without one leaves sizes unknown
+    rm -f "${STORE_PATHS}"
+    if _util_is_local "${1}"; then
+        [ -f "${1%/*}/store-paths.xz" ] && cp "${1%/*}/store-paths.xz" "${STORE_PATHS}.$$"
+    else
+        _api_fetcher "${1%/*}/store-paths.xz" "${STORE_PATHS}.$$" 2>/dev/null
+    fi
+    if [ -s "${STORE_PATHS}.$$" ]; then
+        bytes="$((${bytes:-0} + $(wc -c < "${STORE_PATHS}.$$")))"
+        mv "${STORE_PATHS}.$$" "${STORE_PATHS}"
+    fi
+    rm -f "${STORE_PATHS}.$$"
+    return 0
 }
 
 _counts() {
@@ -299,7 +318,12 @@ _index() {
     system="$(_platform)" || _api_answer_unreachable "nixpkgs has no catalog for ${_util_machine_in__os}/${_util_machine_in__cpu}"
     if [ X"${mode}" = X"bytes" ]; then
         _ib__answer="$(_release_of "${CHANNEL}")" || exit 0
-        _api_answer_bytes_of "${_ib__answer#*${NL}}"
+        _ib__url="${_ib__answer#*${NL}}"
+        _ib__n="$(_api_fetcher_head_size "${_ib__url}")"
+        [ -n "${_ib__n}" ] || exit 0
+        _ib__sp="$(_api_fetcher_head_size "${_ib__url%/*}/store-paths.xz")"
+        printf "bytes=%s\\n" "$((_ib__n + ${_ib__sp:-0}))"
+        exit 0
     fi
     if ! command -v sqlite3 >/dev/null 2>&1; then
         _api_answer_unreachable "sqlite3 is not here to read the catalog with"
@@ -313,6 +337,7 @@ _index() {
     have=""; IFS= read -r have 2>/dev/null < "${RELEASE}"
     if [ X"${have}" = X"${release}" ] && [ -s "${INDEX}" ] && \
        { [ -f "${CH}/index/${release}.tar.xz" ] || [ -f "${CH}/nixpkgs/${release}/default.nix" ]; }; then
+        [ -s "${STORE_PATHS}" ] || _store_paths "${url}"
         _counts
         exit 0
     fi
@@ -328,8 +353,7 @@ _index() {
         *) _api_answer_unreachable "the catalog of ${release} ${CATALOG_STOPPED}" ;;
     esac
     bytes="$(wc -c < "${part}" | awk '{print $1}')"
-    #not cut short from here: the old index could be left half replaced
-    trap '' TERM INT HUP
+    _api_catalog_arrived
 
     work="${CH}/index/work.$$"
     rm -rf "${work}"; _util_mkdir_p "${work}" || exit 1
@@ -355,6 +379,7 @@ _index() {
     printf "%s\\n" "${url}" | _util_write_aside "${CH}/index/source"
     mv "${part}" "${CH}/index/${release}.tar.xz"
     rm -rf "${work}"
+    _store_paths "${url}"
     _sweep
     for old in "${CH}"/index/*.tar.xz; do
         [ -f "${old}" ] && [ X"${old}" != X"${CH}/index/${release}.tar.xz" ] && rm -f "${old}"
@@ -392,10 +417,54 @@ _probe() {
     IFS= read -r release < "${RELEASE}"
     [ -n "${2}" ] && [ X"${2}" != X"${release}" ] && exit 1
     printf "version=%s\\n" "${release}"
-    #no size: nix cannot tell one without evaluating nixpkgs
     printf "package=nixpkgs.%s\\n" "${attr}"
     printf "requires=%s\\n" "${TOOL_SPEC}"
+    if _download_bytes "${attr}" "${release}"; then
+        printf "bytes=%s\\n" "${_download_bytes__out}"
+        #what something installed since then shares is not taken off
+        [ -n "${_download_bytes__kept}" ] && printf "estimate=yes\\n"
+    fi
     exit 0
+}
+
+_download_bytes() {
+    #$1 => an attribute, $2 => the release. What installing it downloads, as
+    #nix says when asked by store path, which needs no evaluation of nixpkgs:
+    #the release's store-paths has the path, and nix-portable, once here, the
+    #closure. Kept for the release: asking nix takes seconds
+    #    tmux  =>  /nix/store/...-tmux-3.5a  =>  "(788.48 KiB download"  =>  __out 807403
+    #1 with no store-paths, no nix-portable, no path of that name or a build
+    _download_bytes__out=""; _download_bytes__kept=""
+    _db__kept="${CH}/cache/download/${1}"
+    if [ -f "${_db__kept}" ] && read -r _db__release _download_bytes__out < "${_db__kept}" && \
+       [ X"${_db__release}" = X"${2}" ]; then
+        _download_bytes__kept="1"
+        _util_is_number "${_download_bytes__out}"
+        return
+    fi
+    _download_bytes__out=""
+    [ -x "${CH}/tool/current" ] && [ -s "${STORE_PATHS}" ] || return 1
+    _db__name="${1##*.}"
+    case "${_db__name}" in ''|*[!A-Za-z0-9_+-]*) return 1 ;; esac
+    #the package's own path, not one of its outputs nor a longer name it begins
+    _db__path="$(XZ_OPT= XZ_DEFAULTS= xz -dc "${STORE_PATHS}" 2>/dev/null | LC_ALL=C awk -v n="${_db__name}" '
+        index($0, "-" n "-") == 44 && substr($0, 46 + length(n)) ~ /^[0-9]/ &&
+        $0 !~ /-(man|doc|dev|lib|bin|out|info|debug|dist|static|devdoc|terminfo|data|tests)$/ {print; exit}')"
+    [ -n "${_db__path}" ] || return 1
+    _db__said="$(CMDFOUND_REQUIRED="${CH}/tool/current" _run_tool nix build --dry-run --max-jobs 0 "${_db__path}" 2>&1)" || return 1
+    case "${_db__said}" in *"will be built"*) return 1 ;; esac
+    _download_bytes__out="$(printf "%s\\n" "${_db__said}" | awk '
+        /will be fetched/ {
+            if (match($0, /\(([0-9.]+) (B|KiB|MiB|GiB) download/)) {
+                split(substr($0, RSTART + 1, RLENGTH - 1), w, " ")
+                m = (w[2] == "GiB") ? 1073741824 : (w[2] == "MiB") ? 1048576 : (w[2] == "KiB") ? 1024 : 1
+                printf("%d\n", w[1] * m); found = 1; exit
+            }
+        }
+        END { if (!found) print 0 }')"
+    _util_is_number "${_download_bytes__out}" || return 1
+    _util_mkdir_p "${_db__kept%/*}" && printf "%s %s\\n" "${2}" "${_download_bytes__out}" | _util_write_aside "${_db__kept}"
+    return 0
 }
 
 _locate() {

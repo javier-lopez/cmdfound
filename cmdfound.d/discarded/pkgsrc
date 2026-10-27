@@ -1,0 +1,3 @@
+#description: pkgsrc - NetBSD's portable packages
+#decided: 2026-09-17
+#why: Linux binaries only for el7 (pkgsrc.smartos.org): 19,409 packages, last built 2024-07-31; little that is new, and little that can be verified

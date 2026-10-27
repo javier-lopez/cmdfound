@@ -1,0 +1,26 @@
+#description: cmdfound channel - ROSA packages, installed by dnf inside the image
+#usage: rosa meta | rosa index [bytes] | rosa search WORDS...
+#       rosa probe NAME [VER] | rosa recipe PACKAGE VER [PROGRAM]
+#covers: openmandriva - 1,345 of the commands both add after the other channels are ROSA's too; ROSA has an image, OpenMandriva none (2026-10-26)
+
+#ROSA's row in the rpm channel: ROSA 13, main, contrib and non-free, each a
+#single release repository. The image knows main alone, under a name with
+#the architecture in it, so all three are handed to dnf by url, with the
+#ROSA key the image has; dnf checks every rpm with it
+DISTRO="ROSA"
+RELEASE="13"
+DISTRO_RELEASE="${DISTRO} ${RELEASE}"
+ARCHES="x86_64 aarch64 riscv64"
+MIRROR="${CMDFOUND_ROSA_MIRROR:-https://mirror.yandex.ru/rosa}"
+REPOS_AT="${MIRROR}/rosa${RELEASE}/repository"
+#each a dnf repository, named as the recipe names it
+REPOS="rosa-main=\$basearch/main/release rosa-contrib=\$basearch/contrib/release rosa-non-free=\$basearch/non-free/release"
+KEYS="rosa-main=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-ROSA rosa-contrib=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-ROSA rosa-non-free=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-ROSA"
+INSTALLER="dnf"
+REGISTRY="${CMDFOUND_ROSA_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="rosalab/rosa13"
+TAG="latest"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#what the image was made with, dnf repoquery --userinstalled on 2026-10-26;
+#what they require is had too
+BASE="basesystem-minimal dnf openssh-server passwd rosa-repos systemd"

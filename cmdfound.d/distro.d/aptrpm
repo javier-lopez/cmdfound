@@ -1,0 +1,157 @@
+#description: cmdfound library - a catalog of ALT's rpm packages, installed by apt-get inside the distro's image
+#usage: loaded by distro after a row of distro.d/aptrpm.d/, which sets DISTRO,
+#       DISTRO_RELEASE, ARCHES, MIRROR, BRANCH, VENDOR, BASE, IMAGE, REGISTRY,
+#       REPOSITORY and TAG
+FORMAT="aptrpm"
+NEEDS="xz"
+#ALT's releases sum their pkglists in MD5 and BLAKE2b alone, and busybox has
+#no b2sum: there openssl says the BLAKE2b, and is got like any other need
+command -v b2sum >/dev/null 2>&1 || NEEDS="xz openssl"
+INSTALLER="apt-get"
+
+_dirs() {
+    #where the packages are: this machine's architecture and noarch
+    printf "%s\\n" "${arch}" "noarch"
+}
+
+_index_bytes() {
+    _dirs | while read -r _ib__dir; do
+        printf "%s\\n" "${MIRROR}/${BRANCH}/${_ib__dir}/base/release" "${MIRROR}/${BRANCH}/${_ib__dir}/base/pkglist.classic.xz"
+    done | _heads_bytes
+}
+
+_fetch() {
+    #each directory's release, then its pkglist held to the sum the release
+    #lists. The release's signature is apt's to check, in the image
+    for _fe__dir in $(_dirs); do
+        _fe__rel="${CH}/index/${_fe__dir}.release"
+        _api_fetcher_answered "${MIRROR}/${BRANCH}/${_fe__dir}/base/release" "${_fe__rel}.$$"
+        case "${?}" in
+            0) mv "${_fe__rel}.$$" "${_fe__rel}" || { rm -f "${_fe__rel}.$$"; exit 1; } ;;
+            1) _api_answer_unreachable "there is no ${_fe__dir} catalog for ${DISTRO_RELEASE} at ${MIRROR}" ;;
+            *) _api_answer_unreachable "${DISTRO}'s ${_fe__dir} release could not be downloaded" ;;
+        esac
+        bytes="$((bytes + $(wc -c < "${_fe__rel}")))"
+        _sum_in "${_fe__rel}" "base/pkglist.classic.xz" || \
+            _api_answer_unreachable "${DISTRO}'s ${_fe__dir} release lists no sum of its pkglist"
+        _catalog_file "${MIRROR}/${BRANCH}/${_fe__dir}/base/pkglist.classic.xz" "${CH}/index/${_fe__dir}.pkglist.xz" \
+            "${DISTRO}'s ${_fe__dir} pkglist" "${_sum_in__out}" "its release"
+    done
+}
+
+_rows() {
+    #the rows of every pkglist, for _priced. A pkglist is rpm headers one after
+    #another, read as bytes: od writes them as numbers, awk takes each header's
+    #index of tags and reads the ones a row needs
+    #    1000 name  1001 version  1002 release  1003 epoch  1004 summary
+    #    1047 provides  1049 requires  1116-1118 files  1000001 the rpm's size
+    #        =>  pkg  jq  1:1.7.1-alt1  412000  x86_64  ...
+    #            cmd  jq  jq          a file under /usr/bin, /bin, /usr/sbin or /sbin
+    #
+    #A file provided is kept only where something requires it: every file of
+    #every package is most of a pkglist and is never asked for.
+    #
+    #Of the 150 MB of p11's x86_64 pkglist, the tags a row reads are 16 and the
+    #index 11; awk passes over the od lines of the rest, the changelogs most of
+    #it. od writes 4-byte words, a fifth of its time in bytes, in this
+    #machine's order, which od itself is asked. mawk, where there is one, reads
+    #it in half of gawk's time (2026-10-27: 45 s, 82 s; before all this, 126 s)
+    _ro__awk="awk"
+    command -v mawk >/dev/null 2>&1 && _ro__awk="mawk"
+    _ro__le="0"
+    [ X"$(printf '\001\000\000\000' | od -An -tu4 | tr -d ' ')" = X"1" ] && _ro__le="1"
+    for _ro__dir in $(_dirs); do
+        _unpacked "${CH}/index/${_ro__dir}.pkglist.xz" | od -An -v -tu4 | \
+            LC_ALL=C "${_ro__awk}" -v le="${_ro__le}" -v repo="${_ro__dir}" '
+        function u32(o) { return ((b[o] * 256 + b[o + 1]) * 256 + b[o + 2]) * 256 + b[o + 3] }
+        function str(o,   s, c) { s = ""; while ((c = b[o++]) != 0) s = s ch[c]; return s }
+        function strs(o, n, arr,   i, c, s) {
+            for (i = 0; i < n; i++) { s = ""; while ((c = b[o++]) != 0) s = s ch[c]; arr[i] = s }
+        }
+        #a header: 8 bytes of magic, how many tags, how long its data, then
+        #16 bytes a tag (tag, type, offset, count) and the data. h is where it
+        #starts in the pkglist, d where its data does and e where it ends
+        function decode(   ev, nm, k, d, A, D) {
+            nm = str(O[1000]); ev = (1003 in O) ? u32(O[1003]) ":" : ""
+            printf("pkg\t%s\t%s%s-%s\t%d\t%s\t%s\n", nm, ev, str(O[1001]), str(O[1002]), (1000001 in O) ? u32(O[1000001]) : 0, repo, str(O[1004]))
+            if (1047 in O) { strs(O[1047], C[1047], A); for (k = 0; k < C[1047]; k++) printf("prov\t%s\t%s\n", A[k], nm) }
+            if (1049 in O) { strs(O[1049], C[1049], A); for (k = 0; k < C[1049]; k++) if (substr(A[k], 1, 7) != "rpmlib(") printf("dep\t%s\t%s\n", nm, A[k]) }
+            if ((1116 in O) && (1117 in O) && (1118 in O)) {
+                strs(O[1117], C[1117], A); strs(O[1118], C[1118], D)
+                for (k = 0; k < C[1117]; k++) {
+                    d = D[u32(O[1116] + 4 * k)]
+                    printf("file\t%s\t%s\n", d A[k], nm)
+                    if (d ~ /^(\/usr)?\/s?bin\/$/) printf("cmd\t%s\t%s\n", A[k], nm)
+                }
+            }
+        }
+        #the index read: where each tag a row needs is, and the stretches of the
+        #data they take, in order, so that a line of none of them is passed over
+        function index_read(   ni, i, j, t, off, end, x, tmp) {
+            ni = u32(h + 8); d = h + 16 + 16 * ni; e = d + u32(h + 12)
+            split("", O); split("", C); m = 0
+            for (i = 0; i < ni; i++) { x = h + 16 + 16 * i; offs[i] = u32(x + 8) }
+            for (i = 0; i < ni; i++) {
+                x = h + 16 + 16 * i; t = u32(x)
+                if (!(t in want)) continue
+                off = offs[i]; end = e - d
+                for (j = 0; j < ni; j++) if (offs[j] > off && offs[j] < end) end = offs[j]
+                O[t] = d + off; C[t] = u32(x + 12)
+                m++; s0[m] = d + off; e0[m] = d + end
+            }
+            #by start, few enough for an insertion sort
+            for (i = 2; i <= m; i++) for (j = i; j > 1 && s0[j - 1] > s0[j]; j--) {
+                tmp = s0[j]; s0[j] = s0[j - 1]; s0[j - 1] = tmp; tmp = e0[j]; e0[j] = e0[j - 1]; e0[j - 1] = tmp
+            }
+            k = 1
+        }
+        function done() { decode(); split("", b); h = e; stage = 0 }
+        function feed(a, v) {
+            if (stage == 0) { b[a] = v; if (a == h + 15) { stage = 1; if (u32(h + 8) == 0) { index_read(); stage = 2; if (e == d) done() } } return }
+            if (stage == 1) { b[a] = v; if (a == d0() - 1) { index_read(); stage = 2; if (e == d) done() } return }
+            while (k <= m && e0[k] <= a) k++
+            if (k <= m && a >= s0[k]) b[a] = v
+            if (a == e - 1) done()
+        }
+        function d0() { return h + 16 + 16 * u32(h + 8) }
+        BEGIN {
+            for (i = 1; i < 256; i++) ch[i] = sprintf("%c", i)
+            split("1000 1001 1002 1003 1004 1047 1049 1116 1117 1118 1000001", w, " ")
+            for (i in w) want[w[i]] = 1
+            h = 0; stage = 0; p = 0
+        }
+        {
+            #a line of od is 16 bytes; one wholly inside the data of a header and
+            #in no stretch a row needs is passed over without being split
+            if (stage == 2 && p >= d && p + 16 < e) {
+                while (k <= m && e0[k] <= p) k++
+                if (k > m || s0[k] >= p + 16) { p += 16; next }
+            }
+            #a word of od is 4 bytes as this machine orders them: the bytes of
+            #the pkglist are taken back out in their order
+            for (i = 1; i <= NF; i++) {
+                v = $i
+                for (j = 0; j < 4; j++) { x4[le ? j : 3 - j] = v % 256; v = int(v / 256) }
+                for (j = 0; j < 4; j++) feed(p + j, x4[j])
+                p += 4
+            }
+        }
+        #od fills the last word with zero bytes, never more than three
+        END { if (stage != 0 || p - h > 3) exit 1 }' || return 1
+    done > "${new}.rows" || return 1
+    LC_ALL=C awk -F'\t' '
+        FNR == NR { if ($1 == "dep") want[$3] = 1; next }
+        $1 == "file" { if (($2) in want) printf("prov\t%s\t%s\n", $2, $3); next }
+        { print }' "${new}.rows" "${new}.rows"
+}
+
+_install_line() {
+    #$1 => a package, $2 => its version as rpm writes it, its epoch included:
+    #without one apt-get matches nothing. The image's sources set aside for the
+    #branch indexed; apt-get can end well having installed nothing, so rpm is
+    #asked after it
+    _util_is_url "${MIRROR}" || return 1
+    case "${VENDOR}" in ''|*[!a-z0-9_-]*) return 1 ;; esac
+    _install_line__out="rm -f /etc/apt/sources.list.d/*.list && printf '%s\\n' 'rpm [${VENDOR}] ${MIRROR} ${BRANCH}/${arch} classic' 'rpm [${VENDOR}] ${MIRROR} ${BRANCH}/noarch classic' > /etc/apt/sources.list && apt-get update && apt-get install -y ${1}=${2} && rpm -q ${1} && apt-get clean"
+}
+

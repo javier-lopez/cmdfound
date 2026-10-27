@@ -1,0 +1,22 @@
+#description: cmdfound channel - Arch Linux packages, installed by pacman inside the image
+#usage: arch meta | arch index [bytes] | arch search WORDS...
+#       arch probe NAME [VER] | arch recipe PACKAGE VER [PROGRAM]
+
+#Arch's row in the pacman channel: rolling, core, extra and multilib, their
+#.files read for commands. The databases are not signed on the mirrors; the
+#packages are, and pacman checks them with the image's keyring
+DISTRO="Arch"
+DISTRO_RELEASE="${DISTRO}"
+ARCHES="x86_64"
+MIRROR="${CMDFOUND_ARCH_MIRROR:-https://geo.mirror.pkgbuild.com}"
+REPOS="core=${MIRROR} extra=${MIRROR} multilib=${MIRROR}"
+#the repositories whose commands are answered; the rest only say what they pull in
+COMMANDS="core extra multilib"
+#each mirrorlist of the image, and the server it is pointed at
+LISTS="/etc/pacman.d/mirrorlist=${MIRROR}"
+REGISTRY="${CMDFOUND_ARCH_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="library/archlinux"
+TAG="latest"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#the image's packages on 2026-10-26, pacman -Qq
+BASE="acl archlinux-keyring attr audit base bash binutils brotli bzip2 ca-certificates ca-certificates-mozilla ca-certificates-utils coreutils cryptsetup curl dbus dbus-broker dbus-broker-units dbus-units device-mapper e2fsprogs expat file filesystem findutils gawk gcc-libs gdbm gettext glib2 glibc gmp gnulib-l10n gnupg gnutls gpgme grep gzip hwdata iana-etc icu iproute2 iptables iputils jansson json-c kbd keyutils kmod krb5 leancrypto libarchive libasan libassuan libatomic libbpf libcap libcap-ng libelf libevent libffi libgcc libgcrypt libgfortran libgomp libgpg-error libhwasan libidn2 libksba libldap liblsan libmakepkg-dropins libmnl libnetfilter_conntrack libnfnetlink libnftnl libnghttp2 libnghttp3 libngtcp2 libnl libnsl libobjc libp11-kit libpcap libpsl libquadmath libsasl libseccomp libsecret libssh2 libstdc++ libsysprof-capture libtasn1 libtirpc libtsan libubsan libunistring libusb libverto libxcrypt libxml2 licenses linux-api-headers lmdb lz4 mpfr ncurses nettle nftables npth openssl p11-kit pacman pacman-mirrorlist pam pambase pciutils pcre2 pinentry popt procps-ng psmisc readline sed shadow sqlite systemd systemd-libs systemd-sysvcompat tar tpm2-tss tzdata util-linux util-linux-libs xz zlib zstd"

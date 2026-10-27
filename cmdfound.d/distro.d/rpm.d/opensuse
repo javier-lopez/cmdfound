@@ -1,0 +1,21 @@
+#description: cmdfound channel - openSUSE Tumbleweed packages, installed by zypper inside the image
+#usage: opensuse meta | opensuse index [bytes] | opensuse search WORDS...
+#       opensuse probe NAME [VER] | opensuse recipe PACKAGE VER [PROGRAM]
+
+#openSUSE Tumbleweed's row in the rpm channel: rolling, its oss repository on
+#x86_64. repomd.xml is signed (repomd.xml.asc) and so are the rpms: zypper
+#checks both with the keys the image has
+DISTRO="openSUSE Tumbleweed"
+DISTRO_RELEASE="${DISTRO}"
+ARCHES="x86_64"
+MIRROR="${CMDFOUND_OPENSUSE_MIRROR:-https://download.opensuse.org}"
+REPOS_AT="${MIRROR}/tumbleweed"
+REPOS="repo-oss=repo/oss"
+INSTALLER="zypper"
+REGISTRY="${CMDFOUND_OPENSUSE_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="opensuse/tumbleweed"
+TAG="latest"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#what the image was made with, its packages but those in
+#/var/lib/zypp/AutoInstalled, on 2026-10-26; what they require is had too
+BASE="aaa_base bash ca-certificates ca-certificates-mozilla coreutils cracklib-dict-small curl filesystem glibc glibc-locale-base gzip libcurl-mini4 lsb-release netcfg openSUSE-build-key openSUSE-release openSUSE-release-appliance-docker openssl patterns-base-fips patterns-base-minimal_base procps shadow system-user-nobody tar timezone zypp-excludedocs zypp-no-recommends zypper"

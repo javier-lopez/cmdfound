@@ -1,0 +1,22 @@
+#description: cmdfound channel - Wolfi packages, installed by apk inside the image
+#usage: wolfi meta | wolfi index [bytes] | wolfi search WORDS...
+#       wolfi probe NAME [VER] | wolfi recipe PACKAGE VER [PROGRAM]
+
+#Wolfi's row in the apk channel: glibc, rolling, one repository built for two
+#machines. Its image's own repositories file names Chainguard's, which the
+#recipe sets aside; the key of this one is in the image
+DISTRO="Wolfi"
+DISTRO_RELEASE="${DISTRO}"
+ARCHES="x86_64 aarch64"
+MIRROR="${CMDFOUND_WOLFI_MIRROR:-https://packages.wolfi.dev}"
+REPOS_AT="${MIRROR}"
+REPOS="os"
+#every version it ever built, in no order
+EVERY_VERSION="yes"
+REGISTRY="${CMDFOUND_WOLFI_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="chainguard/wolfi-base"
+TAG="latest"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#the image's /etc/apk/world on 2026-10-26. The index keeps every version, so
+#glibc-2.44 and the like stay had after the image moves past them
+BASE="apk-tools busybox ca-certificates-bundle glibc-2.44-locale-posix glibc-2.44 ld-linux-2.44 libbrotlicommon1 libbrotlidec1 libbrotlienc1 libcrypt1-2.44 libgcc libxcrypt openssl-4.0-libcrypto openssl-4.0-libssl openssl-provider-legacy-allowed wolfi-base wolfi-baselayout wolfi-keys zlib"

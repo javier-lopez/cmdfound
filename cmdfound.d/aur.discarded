@@ -1,3 +1,0 @@
-#description: aur - the Arch User Repository
-#decided: 2026-10-26
-#why: it runs unreviewed PKGBUILDs, -bin packages included, and has no signed index or file list

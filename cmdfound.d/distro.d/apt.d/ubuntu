@@ -1,0 +1,22 @@
+#description: cmdfound channel - Ubuntu packages, installed by apt-get inside the image
+#usage: ubuntu meta | ubuntu index [bytes] | ubuntu search WORDS...
+#       ubuntu probe NAME [VER] | ubuntu recipe PACKAGE VER [PROGRAM]
+#covers: debian, debian-sid - sid adds 1,643 commands after Ubuntu 26.04 (23,138 alone), and Debian publishes no command index (2026-10)
+
+#Ubuntu's row in the apt channel: 26.04 LTS, resolute, its release and its
+#-updates, which -security is published into as well. One archive serves
+#every architecture
+DISTRO="Ubuntu"
+RELEASE="26.04"
+DISTRO_RELEASE="${DISTRO} ${RELEASE}"
+ARCHES="amd64 arm64 armhf ppc64el riscv64 s390x"
+MIRROR="${CMDFOUND_UBUNTU_MIRROR:-http://archive.ubuntu.com/ubuntu}"
+SUITES="resolute resolute-updates"
+REPOS="main restricted universe multiverse"
+KEYRING="/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+REGISTRY="${CMDFOUND_UBUNTU_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="library/ubuntu"
+TAG="${RELEASE}"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#the image's packages on 2026-10-26, 26.04.1: what they need is in it
+BASE="apt base-files base-passwd bash bsdutils coreutils coreutils-from-uutils dash debconf debianutils diffutils dpkg e2fsprogs findutils gcc-16-base gnu-coreutils gpgv grep gzip hostname init-system-helpers libacl1 libapt-pkg7.0 libattr1 libaudit-common libaudit1 libblkid1 libbsd0 libbz2-1.0 libc-bin libc-gconv-modules-extra libc6 libcap-ng0 libcom-err2 libcrypt1 libdb5.3t64 libdebconfclient0 libext2fs2t64 libgcc-s1 libgcrypt20 libgmp10 libgpg-error0 liblz4-1 liblzma5 libmd0 libmount1 libncursesw6 libpam-modules libpam-modules-bin libpam-runtime libpam0g libpcre2-8-0 libproc2-0 libseccomp2 libselinux1 libsemanage-common libsemanage2 libsepol2 libsmartcols1 libss2 libssl3t64 libstdc++6 libsystemd0 libtinfo6 libudev1 libuuid1 libxxhash0 libzstd1 login login.defs logsave mawk mount ncurses-base ncurses-bin openssl-provider-legacy passwd perl-base procps rust-coreutils sed sensible-utils sysvinit-utils tar ubuntu-keyring util-linux zlib1g"

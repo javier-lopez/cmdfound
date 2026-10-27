@@ -1,0 +1,158 @@
+#description: cmdfound library - a catalog of pacman packages, installed by pacman inside the distro's image
+#usage: loaded by distro after a row of distro.d/pacman.d/, which sets DISTRO,
+#       DISTRO_RELEASE, ARCHES, MIRROR, REPOS, COMMANDS, LISTS, BASE, IMAGE,
+#       REGISTRY, REPOSITORY and TAG, and may set KEYS, KEYRINGS and NEEDS
+FORMAT="pacman"
+#NEEDS is the row's: zstd, for a repository whose database is compressed with it
+INSTALLER="pacman"
+#where the image looks up a key KEYS names
+KEYSERVER="hkps://keyserver.ubuntu.com"
+
+_server_in() {
+    #$1 => a server as REPOS or LISTS names it. The same as a pacman Server
+    #line writes it: Arch's layout unless it says its own with $arch. 1 for
+    #one that is no url once $repo and $arch are taken out
+    #    https://geo.mirror.pkgbuild.com            =>  https://geo.mirror.pkgbuild.com/$repo/os/$arch
+    #    https://cdn-mirror.chaotic.cx/$repo/$arch  =>  https://cdn-mirror.chaotic.cx/$repo/$arch
+    case "${1}" in
+        *'$arch'*) _server_in__out="${1}" ;;
+        *) _server_in__out="${1}/\$repo/os/\$arch" ;;
+    esac
+    _util_is_url "$(printf "%s" "${_server_in__out}" | sed -e 's/[$]repo//g' -e 's/[$]arch//g')"
+}
+
+_repo_in() {
+    #$1 => one of REPOS, its name and the server it is under. What is
+    #fetched of it: a repository whose commands are asked for, one of
+    #COMMANDS, is its .files, which lists them; any other its .db, enough to
+    #know what its packages pull in
+    #    extra=https://geo.mirror.pkgbuild.com, COMMANDS="extra"
+    #        =>  __name extra, __url https://geo.mirror.pkgbuild.com/extra/os/x86_64/extra.files
+    #    chaotic-aur=https://cdn-mirror.chaotic.cx/$repo/$arch, COMMANDS="chaotic-aur"
+    #        =>  __url https://cdn-mirror.chaotic.cx/chaotic-aur/x86_64/chaotic-aur.files
+    case "${1}" in
+        [a-z]*=?*) ;;
+        *) return 1 ;;
+    esac
+    _repo_in__name="${1%%=*}"
+    case "${_repo_in__name}" in *[!a-z0-9_-]*) return 1 ;; esac
+    _ri__kind="db"
+    _util_has_word "${COMMANDS}" "${_repo_in__name}" && _ri__kind="files"
+    _server_in "${1#*=}" || return 1
+    _repo_in__server="${_server_in__out}"
+    _ri__dir="$(printf "%s" "${_repo_in__server}" | sed -e "s/[$]repo/${_repo_in__name}/g" -e "s/[$]arch/${arch}/g")"
+    _repo_in__url="${_ri__dir}/${_repo_in__name}.${_ri__kind}"
+}
+
+_index_bytes() {
+    for _ib__repo in ${REPOS}; do
+        _repo_in "${_ib__repo}" || return 0
+        printf "%s\\n" "${_repo_in__url}"
+    done | _heads_bytes
+}
+
+_fetch() {
+    #each repository's database, whole: its signature and the packages' are
+    #pacman's to check, in the image
+    for _fe__repo in ${REPOS}; do
+        _repo_in "${_fe__repo}" || _api_answer_unreachable "${SELF_NAME} names a repository as '${_fe__repo}', which is no name=server"
+        _catalog_file "${_repo_in__url}" "${CH}/index/${_repo_in__url##*/}" \
+            "${DISTRO}'s ${_repo_in__name} catalog for ${arch}"
+    done
+}
+
+_rows() {
+    #the rows of every database, for _priced, in REPOS' order: pacman takes a
+    #name from the first repository that has it, and so does this
+    #    %NAME% nmap  %VERSION% 7.992-1  %CSIZE% 2193920  %DEPENDS% lua54 openssl>=3
+    #    %FILES% usr/bin/nmap
+    #        =>  pkg  nmap  7.992-1  2193920  extra  Utility for network discovery...
+    #            dep  nmap  lua54
+    #            dep  nmap  openssl
+    #            cmd  nmap  nmap
+    #
+    #tar -O runs every member together: a desc begins with %FILENAME% and a
+    #files with %FILES%. A package's two are next to each other, desc first
+    #in Arch's and files first in BlackArch's, so a .files is read two members
+    #at a time and a .db one at a time. TAR_OPTIONS emptied: set, it would
+    #change what comes out
+    for _ro__repo in ${REPOS}; do
+        _repo_in "${_ro__repo}" || return 1
+        printf "@@repo %s %s\\n" "${_repo_in__name}" "${_ri__kind}"
+        _unpacked "${CH}/index/${_repo_in__url##*/}" 2>/dev/null | TAR_OPTIONS= tar -xOf - 2>/dev/null || printf "%s\\n" "@@failed"
+    done | LC_ALL=C awk '
+    function flush() {
+        if (name != "" && !((name) in seen)) {
+            seen[name] = 1
+            if (csize !~ /^[0-9]+$/) csize = 0
+            gsub(/\t/, " ", desc)
+            printf("pkg\t%s\t%s\t%s\t%s\t%s\n", name, ver, csize, repo, desc)
+            for (i = 1; i <= nprov; i++) printf("prov\t%s\t%s\n", prov[i], name)
+            for (i = 1; i <= ndep; i++) printf("dep\t%s\t%s\n", name, dep[i])
+            for (i = 1; i <= ncmd; i++) printf("cmd\t%s\t%s\n", cmd[i], name)
+        }
+        name = ""; ver = ""; csize = ""; desc = ""; nprov = 0; ndep = 0; ncmd = 0; section = ""; started = 0
+    }
+    #a name as a relation writes it, its version dropped
+    #    openssl>=3  =>  openssl      libcrypto.so=3-64  =>  libcrypto.so
+    function bare(t) {
+        sub(/[<>=].*$/, "", t)
+        return t
+    }
+    function member() { if (++members == per) { flush(); members = 0 } }
+    /^@@failed$/ { failed = 1; exit 1 }
+    /^@@repo / { flush(); members = 0; repo = $2; per = ($3 == "files") ? 2 : 1; next }
+    /^%FILENAME%$/ || /^%FILES%$/ { if (started) member(); started = 1; section = $0; next }
+    /^%[A-Z0-9]+%$/ { section = $0; next }
+    $0 == "" { next }
+    section == "%NAME%" { name = $0; next }
+    section == "%VERSION%" { ver = $0; next }
+    section == "%CSIZE%" { csize = $0; next }
+    section == "%DESC%" { desc = $0; next }
+    section == "%PROVIDES%" { t = bare($0); if (t != "") prov[++nprov] = t; next }
+    section == "%DEPENDS%" { t = bare($0); if (t != "") dep[++ndep] = t; next }
+    #Arch keeps every program in usr/bin: /bin and /sbin lead there
+    section == "%FILES%" {
+        if ($0 ~ /^usr\/bin\/[^\/]+$/) { t = $0; sub(/^usr\/bin\//, "", t); cmd[++ncmd] = t }
+        next
+    }
+    END { if (failed) exit 1; flush() }'
+}
+
+_install_line() {
+    #$1 => a package, $2 => its version as pacman writes it. Each mirrorlist
+    #LISTS names points at the server the catalog came from, the databases are
+    #synced, and that version alone is installed: pacman refuses another. The
+    #signatures are pacman's to check, with the keys the image has. A
+    #repository the image does not know, one KEYS names, is added after the
+    #image's, as REPOS lists it last: its key fetched by fingerprint and signed
+    #on a master key made for it, then KEYRINGS, the keys its packages are
+    #signed with, installed under that one
+    _il__lists=""
+    for _il__list in ${LISTS}; do
+        case "${_il__list}" in /etc/pacman.d/*=?*) ;; *) return 1 ;; esac
+        _server_in "${_il__list#*=}" || return 1
+        _il__lists="${_il__lists}printf '%s\\n' 'Server = ${_server_in__out}' > ${_il__list%%=*} && "
+    done
+    _il__keys=""; _il__repos=""
+    for _il__k in ${KEYS}; do
+        _il__fpr="${_il__k#*=}"
+        case "${_il__fpr}" in ????????????????????????????????????????) ;; *) return 1 ;; esac
+        case "${_il__fpr}" in *[!0-9A-F]*) return 1 ;; esac
+        _il__server=""
+        for _il__repo in ${REPOS}; do
+            _repo_in "${_il__repo}" || return 1
+            [ X"${_repo_in__name}" = X"${_il__k%%=*}" ] && _il__server="${_repo_in__server}"
+        done
+        [ -n "${_il__server}" ] || return 1
+        _il__keys="${_il__keys}pacman-key --recv-keys ${_il__fpr} --keyserver ${KEYSERVER} && pacman-key --lsign-key ${_il__fpr} && "
+        _il__repos="${_il__repos}printf '%s\\n' '[${_il__k%%=*}]' 'Server = ${_il__server}' >> /etc/pacman.conf && "
+    done
+    [ -n "${_il__keys}" ] && _il__keys="pacman-key --init && ${_il__keys}"
+    for _il__ring in ${KEYRINGS}; do
+        _util_is_url "${_il__ring}" || return 1
+        _il__keys="${_il__keys}pacman -U --noconfirm '${_il__ring}' && "
+    done
+    _install_line__out="${_il__lists}${_il__keys}${_il__repos}pacman -Sy --noconfirm && pacman -S --noconfirm --needed '${1}=${2}' && rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*"
+}
+

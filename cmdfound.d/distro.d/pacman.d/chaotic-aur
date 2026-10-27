@@ -1,0 +1,31 @@
+#description: cmdfound channel - Chaotic-AUR's prebuilt AUR packages, installed by pacman inside Arch's image
+#usage: chaotic-aur meta | chaotic-aur index [bytes] | chaotic-aur search WORDS...
+#       chaotic-aur probe NAME [VER] | chaotic-aur recipe PACKAGE VER [PROGRAM]
+
+#Chaotic-AUR's row in the pacman channel: its own repository, read for
+#commands, over Arch's, whose .db say what its packages pull in. The image is
+#Arch's, which does not know it: it is added last, as pacman.conf would have
+#it, under the key Chaotic-AUR publishes, which signs the keyring its packages
+#are signed with. Its database is zstd and not signed, as Arch's are not.
+#On 2026-10-26: 3,138 of the AUR's 123,078 packages, built, 316 of its 1,000
+#most voted; 777 commands after the other channels. The rest is discarded/aur
+DISTRO="Chaotic-AUR"
+DISTRO_RELEASE="${DISTRO}"
+ARCHES="x86_64"
+NEEDS="zstd"
+MIRROR="${CMDFOUND_CHAOTIC_MIRROR:-https://cdn-mirror.chaotic.cx}"
+ARCH_MIRROR="${CMDFOUND_ARCH_MIRROR:-https://geo.mirror.pkgbuild.com}"
+REPOS="core=${ARCH_MIRROR} extra=${ARCH_MIRROR} multilib=${ARCH_MIRROR} chaotic-aur=${MIRROR}/\$repo/\$arch"
+#the repositories whose commands are answered; Arch's are the arch channel's
+COMMANDS="chaotic-aur"
+#the fingerprint of 3056513887B78AEB, the key its install guide names
+KEYS="chaotic-aur=EF925EA60F33D0CB85C44AD13056513887B78AEB"
+KEYRINGS="${MIRROR}/chaotic-aur/chaotic-keyring.pkg.tar.zst"
+#each mirrorlist of the image, and the server it is pointed at
+LISTS="/etc/pacman.d/mirrorlist=${ARCH_MIRROR}"
+REGISTRY="${CMDFOUND_ARCH_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="library/archlinux"
+TAG="latest"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#the image's packages on 2026-10-26, pacman -Qq
+BASE="acl archlinux-keyring attr audit base bash binutils brotli bzip2 ca-certificates ca-certificates-mozilla ca-certificates-utils coreutils cryptsetup curl dbus dbus-broker dbus-broker-units dbus-units device-mapper e2fsprogs expat file filesystem findutils gawk gcc-libs gdbm gettext glib2 glibc gmp gnulib-l10n gnupg gnutls gpgme grep gzip hwdata iana-etc icu iproute2 iptables iputils jansson json-c kbd keyutils kmod krb5 leancrypto libarchive libasan libassuan libatomic libbpf libcap libcap-ng libelf libevent libffi libgcc libgcrypt libgfortran libgomp libgpg-error libhwasan libidn2 libksba libldap liblsan libmakepkg-dropins libmnl libnetfilter_conntrack libnfnetlink libnftnl libnghttp2 libnghttp3 libngtcp2 libnl libnsl libobjc libp11-kit libpcap libpsl libquadmath libsasl libseccomp libsecret libssh2 libstdc++ libsysprof-capture libtasn1 libtirpc libtsan libubsan libunistring libusb libverto libxcrypt libxml2 licenses linux-api-headers lmdb lz4 mpfr ncurses nettle nftables npth openssl p11-kit pacman pacman-mirrorlist pam pambase pciutils pcre2 pinentry popt procps-ng psmisc readline sed shadow sqlite systemd systemd-libs systemd-sysvcompat tar tpm2-tss tzdata util-linux util-linux-libs xz zlib zstd"

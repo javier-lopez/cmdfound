@@ -1,0 +1,3 @@
+#description: guix - GNU Guix
+#decided: 2026-10-26
+#why: no command index: building one means streaming every nar, about an hour and 20 GB per refresh, for 3,567 commands after the planned distros; no official image, and -M 0 needs --no-grafts

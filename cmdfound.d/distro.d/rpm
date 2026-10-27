@@ -1,0 +1,302 @@
+#description: cmdfound library - a catalog of rpm packages, installed by dnf or zypper inside the distro's image
+#usage: loaded by distro after a row of distro.d/rpm.d/, which sets DISTRO,
+#       DISTRO_RELEASE, ARCHES, MIRROR, REPOS_AT, REPOS, KEYS, INSTALLER, BASE,
+#       IMAGE, REGISTRY, REPOSITORY and TAG
+FORMAT="rpm"
+NEEDS="zstd"
+
+_repo_in() {
+    #$1 => one of REPOS, a name and where it is under REPOS_AT or a url of its
+    #own, with dnf's $basearch for this machine's architecture
+    #    updates=updates/44/Everything/$basearch  =>  __name updates,
+    #                                                 __url ${REPOS_AT}/updates/44/Everything/x86_64
+    #    epel=https://dl.fedoraproject.org/pub/epel/10/Everything/$basearch
+    #                                             =>  __name epel, __url https://dl.fedoraproject.org/...
+    _repo_in__name="${1%%=*}"; _ri__path="${1#*=}"
+    #a word with no name of its own is half of one a space cut in two
+    case "${1}" in
+        *=?*) ;;
+        *) return 1 ;;
+    esac
+    case "${_repo_in__name}" in
+        ''|*[!a-z0-9_-]*) return 1 ;;
+    esac
+    case "${_ri__path}" in
+        *'$basearch'*) _ri__path="${_ri__path%%\$basearch*}${arch}${_ri__path#*\$basearch}" ;;
+    esac
+    case "${_ri__path}" in
+        /*|*://*) _repo_in__url="${_ri__path}" ;;
+        *)     _repo_in__url="${REPOS_AT}/${_ri__path}" ;;
+    esac
+}
+
+_repomd_in() {
+    #a repomd.xml on stdin. Where its primary.xml is, the sum it has and what
+    #it weighs, and what the repomd.xml itself weighs
+    #    _repomd_in < repomd.xml  =>  __href repodata/51d5…-primary.xml.zst, __sum sha256 51d5…,
+    #                               __bytes 6840220, __own 7055
+    _ri__said="$(LC_ALL=C awk '
+        { own += length($0) + 1 }
+        /<data type="primary">/ { in_primary = 1 }
+        in_primary && /<\/data>/ { in_primary = 0 }
+        in_primary && /<checksum / {
+            t = $0; sub(/.*type="/, "", t); sub(/".*/, "", t)
+            s = $0; sub(/.*<checksum[^>]*>/, "", s); sub(/<.*/, "", s)
+        }
+        in_primary && /<location / { h = $0; sub(/.*href="/, "", h); sub(/".*/, "", h) }
+        in_primary && /<size>/ { b = $0; sub(/.*<size>/, "", b); sub(/<.*/, "", b) }
+        END { printf("%s %s %s %s %s\n", h, t, s, b, own) }' 2>/dev/null)"
+    read -r _repomd_in__href _ri__type _ri__hex _repomd_in__bytes _repomd_in__own <<EOF
+${_ri__said}
+EOF
+    _repomd_in__sum="${_ri__type} ${_ri__hex}"
+    #the href goes into a url and the sum is compared: neither may carry more
+    case "${_repomd_in__href}" in
+        repodata/*..*|repodata/*[!${ALNUM}._/-]*) return 1 ;;
+        repodata/?*.zst|repodata/?*.gz|repodata/?*.xz) ;;
+        *) return 1 ;;
+    esac
+    case "${_ri__hex}" in ''|*[!0-9a-f]*) return 1 ;; esac
+    _util_is_number "${_repomd_in__bytes}" && _util_is_number "${_repomd_in__own}"
+}
+
+_primaries() {
+    #every primary.xml fetched, unpacked one after the other, each after a line
+    #that names its repository; one that could not be unpacked says so instead
+    for _pr__repo in ${REPOS}; do
+        _repo_in "${_pr__repo}" || { printf "%s\\n" "@@failed"; return 1; }
+        _pr__f="$(_kept_primary)"
+        printf "@@repo %s\\n" "${_repo_in__name}"
+        _unpacked "${_pr__f}" 2>/dev/null || printf "%s\\n" "@@failed"
+    done
+}
+
+_kept_primary() {
+    #the primary.xml of the repository _repo_in read, as it was fetched
+    for _kp__f in "${CH}/index/${_repo_in__name}.primary."*; do
+        case "${_kp__f}" in *.part|*.part.*|*.etag) continue ;; esac
+        [ -f "${_kp__f}" ] && printf "%s\\n" "${_kp__f}" && return 0
+    done
+    return 1
+}
+
+_index_bytes() {
+    #repomd.xml is a few KB and says what its primary.xml weighs
+    _ib__t="0"
+    for _ib__repo in ${REPOS}; do
+        _repo_in "${_ib__repo}" || return 0
+        _ib__md="$(_api_fetcher "${_repo_in__url}/repodata/repomd.xml" 2>/dev/null)" || return 0
+        _repomd_in <<EOF || return 0
+${_ib__md}
+EOF
+        _ib__t="$((_ib__t + _repomd_in__bytes + _repomd_in__own))"
+    done
+    printf "%s\\n" "${_ib__t}"
+}
+
+_fetch() {
+    #each repository's repomd.xml, and the primary.xml it names, held to the
+    #sum it gives. Whether repomd.xml is the distro's own is dnf's and
+    #zypper's to check, in the image
+    for _fe__repo in ${REPOS}; do
+        _repo_in "${_fe__repo}" || _api_answer_unreachable "${SELF_NAME} names a repository as '${_fe__repo}', which is no name=place"
+        _fe__md="${CH}/index/${_repo_in__name}.repomd.xml"
+        _api_fetcher_answered "${_repo_in__url}/repodata/repomd.xml" "${_fe__md}"
+        case "${?}" in
+            0) ;;
+            1) _api_answer_unreachable "there is no ${_repo_in__name} catalog for ${DISTRO_RELEASE} on ${arch} at ${MIRROR}" ;;
+            *) _api_answer_unreachable "${DISTRO}'s ${_repo_in__name} catalog could not be downloaded" ;;
+        esac
+        _repomd_in < "${_fe__md}" || \
+            _api_answer_unreachable "${DISTRO}'s ${_repo_in__name} repomd.xml names no primary.xml this channel can read"
+        bytes="$((bytes + _repomd_in__own))"
+        #one compressed another way than the one kept is another file
+        _fe__kept="${CH}/index/${_repo_in__name}.primary.${_repomd_in__href##*.}"
+        _fe__had="$(_kept_primary)" && [ X"${_fe__had}" != X"${_fe__kept}" ] && rm -f "${_fe__had}"
+        _catalog_file "${_repo_in__url}/${_repomd_in__href}" "${_fe__kept}" \
+            "${DISTRO}'s ${_repo_in__name} primary.xml" "${_repomd_in__sum}" "its repomd.xml"
+    done
+}
+
+#what the indexer's two readings share: an rpm's attributes and rpm's order of
+#versions, rpmvercmp's: runs of digits are numbers, runs of letters come
+#before them, a ~ sorts before anything, even the end, and a ^ after the end
+#and before anything else
+#    1.10 > 1.9 > 1.9~rc1    1.9^git1 > 1.9 and 1.9^git1 < 1.9.1    2:0.1-1 > 1:9-1
+RPM_AWK='
+    function attr(line, key,   i, v) {
+        i = index(line, " " key "=\"")
+        if (i == 0) return ""
+        v = substr(line, i + length(key) + 3)
+        return substr(v, 1, index(v, "\"") - 1)
+    }
+    function unescaped(s) {
+        if (index(s, "&") == 0) return s
+        gsub(/&lt;/, "<", s); gsub(/&gt;/, ">", s); gsub(/&quot;/, "\"", s)
+        gsub(/&apos;/, "'\''", s); gsub(/&amp;/, "\\&", s)
+        return s
+    }
+    function text(line) {
+        sub(/^[ \t]*<[^>]*>/, "", line); sub(/<\/[^>]*>[ \t]*$/, "", line)
+        return unescaped(line)
+    }
+    function vercmp(a, b,   x, y) {
+        if (a == b) return 0
+        while (a != "" || b != "") {
+            sub(/^[^A-Za-z0-9~^]+/, "", a); sub(/^[^A-Za-z0-9~^]+/, "", b)
+            if (substr(a, 1, 1) == "~" || substr(b, 1, 1) == "~") {
+                if (substr(a, 1, 1) != "~") return 1
+                if (substr(b, 1, 1) != "~") return -1
+                a = substr(a, 2); b = substr(b, 2); continue
+            }
+            if (substr(a, 1, 1) == "^" || substr(b, 1, 1) == "^") {
+                if (a == "") return -1
+                if (b == "") return 1
+                if (substr(a, 1, 1) != "^") return 1
+                if (substr(b, 1, 1) != "^") return -1
+                a = substr(a, 2); b = substr(b, 2); continue
+            }
+            if (a == "" || b == "") break
+            if (a ~ /^[0-9]/) {
+                if (b !~ /^[0-9]/) return 1
+                match(a, /^[0-9]+/); x = substr(a, 1, RLENGTH); a = substr(a, RLENGTH + 1)
+                match(b, /^[0-9]+/); y = substr(b, 1, RLENGTH); b = substr(b, RLENGTH + 1)
+                sub(/^0+/, "", x); sub(/^0+/, "", y)
+                if (length(x) != length(y)) return (length(x) > length(y)) ? 1 : -1
+            } else {
+                if (b ~ /^[0-9]/) return -1
+                match(a, /^[A-Za-z]+/); x = substr(a, 1, RLENGTH); a = substr(a, RLENGTH + 1)
+                match(b, /^[A-Za-z]+/); y = substr(b, 1, RLENGTH); b = substr(b, RLENGTH + 1)
+            }
+            if (x "" != y "") return (x "" > y "") ? 1 : -1
+        }
+        if (a == "" && b == "") return 0
+        return (a == "") ? -1 : 1
+    }
+    #an evr is epoch, version and release, tab separated
+    function newer(a, b,   p, q, c) {
+        split(a, p, "\t"); split(b, q, "\t")
+        if (p[1] + 0 != q[1] + 0) return p[1] + 0 > q[1] + 0
+        c = vercmp(p[2], q[2])
+        if (c != 0) return c > 0
+        return vercmp(p[3], q[3]) > 0
+    }
+    BEGIN { split(arches, a_, " "); for (i_ in a_) arch_ok[a_[i_]] = 1 }
+'
+
+_rows() {
+    #the rows of every primary.xml fetched, for _priced
+    #    <name>jq</name> <arch>x86_64</arch> <file>/usr/bin/jq</file>
+    #        =>  cmd  jq   jq
+    #            pkg  jq   1.8.1-3.fc44  232514  updates  Command-line JSON processor
+    #
+    #read twice: first for the newest of each name this machine can install,
+    #the one dnf and zypper pick, then for what that one says. A grep hands awk
+    #only the lines each reading uses, and the commonest is asked about first:
+    #Fedora's are 5 million lines, and each question costs awk on each line
+    _ix__out="${new}"
+    _primaries | LC_ALL=C grep -E '^(@@|  <(name|arch|version)[ >])' | \
+        LC_ALL=C awk -v arches="${arch} noarch" "${RPM_AWK}"'
+        /^  <version / {
+            if (!(arch in arch_ok)) next
+            evr = attr($0, "epoch") "\t" attr($0, "ver") "\t" attr($0, "rel")
+            if (!(name in best) || newer(evr, best[name])) best[name] = evr
+            next
+        }
+        /^  <name>/ { name = text($0); next }
+        /^  <arch>/ { arch = text($0); next }
+        /^@@failed$/ { failed = 1; exit 1 }
+        END { if (failed) exit 1; for (n in best) printf("%s\t%s\n", n, best[n]) }' > "${_ix__out}.best" || return 1
+    _primaries | LC_ALL=C grep -E '^(@@|</?package[ >]|  <(name|arch|version|summary|size)[ >/]|    <(rpm:provides>|rpm:requires>|/rpm:|file)|      <rpm:entry )' | \
+        LC_ALL=C awk -v out="${_ix__out}" -v arches="${arch} noarch" "${RPM_AWK}"'
+        FNR == NR { split($0, f, "\t"); best[f[1]] = f[2] "\t" f[3] "\t" f[4]; next }
+        /^      <rpm:entry / {
+            if (!keep || section == "") next
+            t = attr($0, "name")
+            if (section == "prov") printf("prov\t%s\t%s\n", unescaped(t), name) > (out ".prov")
+            #a ( opens a rich dependency, which dnf and zypper weigh against what
+            #is installed and this does not; rpmlib( is rpm itself
+            else if (substr(t, 1, 1) != "(" && substr(t, 1, 7) != "rpmlib(") printf("dep\t%s\t%s\n", name, unescaped(t)) > (out ".dep")
+            next
+        }
+        /^@@failed$/ { failed = 1; exit 1 }
+        /^@@repo / { repo = substr($0, 8); next }
+        /^<package / { keep = 0; next }
+        /^  <name>/ { name = text($0); next }
+        /^  <arch>/ { arch = text($0); next }
+        /^  <version / {
+            evr = attr($0, "epoch") "\t" attr($0, "ver") "\t" attr($0, "rel")
+            keep = (arch in arch_ok) && (name in best) && best[name] == evr && !((name) in done)
+            if (keep) { done[name] = 1; ver = attr($0, "ver") "-" attr($0, "rel"); summary = ""; size = 0; section = ""; split("", seen) }
+            next
+        }
+        !keep { next }
+        /^  <summary/ { summary = text($0); gsub(/\t/, " ", summary); next }
+        /^  <size / { size = attr($0, "package") + 0; next }
+        /^    <rpm:provides>/ { section = "prov"; next }
+        /^    <rpm:requires>/ { section = "dep"; next }
+        /^    <\/rpm:/ { section = ""; next }
+        /^    <file/ {
+            if (index($0, " type=\"dir\"")) next
+            t = text($0)
+            printf("prov\t%s\t%s\n", t, name) > (out ".prov")
+            if (t ~ /^(\/usr)?\/s?bin\/[^\/]+$/) {
+                sub(/.*\//, "", t)
+                if (!(t in seen)) { seen[t] = 1; printf("cmd\t%s\t%s\n", t, name) > (out ".cmd") }
+            }
+            next
+        }
+        /^<\/package>/ {
+            printf("pkg\t%s\t%s\t%s\t%s\t%s\n", name, ver, size, repo, summary) > (out ".pkg")
+            keep = 0
+        }
+        END {
+            if (failed) exit 1
+            printf("") > (out ".cmd"); printf("") > (out ".pkg"); printf("") > (out ".prov"); printf("") > (out ".dep")
+        }' "${_ix__out}.best" - || return 1
+    #what nothing requires is left out: most of what rpms provide is never asked for
+    cat "${_ix__out}.cmd" "${_ix__out}.pkg" && LC_ALL=C awk -F'\t' 'FNR == NR { want[$3] = 1; next } ($2) in want' "${_ix__out}.dep" "${_ix__out}.prov" && \
+        cat "${_ix__out}.dep"
+}
+
+_install_line() {
+    #$1 => a package, $2 => its version. The one line that installs exactly
+    #that, from this mirror's repositories alone, and no weak dependency: the
+    #bytes probe answered counts none. The signatures are the installer's to
+    #check, with the keys the image has, and its caches go before it ends. A
+    #repository the image does not know is named by its url, with the key
+    #KEYS gives it
+    case "${INSTALLER}" in
+        dnf)
+            _il__repos=""
+            for _il__k in ${KEYS}; do
+                case "${_il__k}" in [a-z]*=?*) ;; *) return 1 ;; esac
+            done
+            for _il__repo in ${REPOS}; do
+                _repo_in "${_il__repo}" || return 1
+                _util_is_url "${_repo_in__url}" || return 1
+                _il__key=""
+                for _il__k in ${KEYS}; do
+                    [ X"${_il__k%%=*}" = X"${_repo_in__name}" ] && _il__key="${_il__k#*=}"
+                done
+                if [ -n "${_il__key}" ]; then
+                    _util_is_url "${_il__key}" || return 1
+                    _il__repos="${_il__repos} --repofrompath=${_repo_in__name},${_repo_in__url} --repo=${_repo_in__name} --setopt=${_repo_in__name}.gpgcheck=1 --setopt=${_repo_in__name}.gpgkey=${_il__key}"
+                else
+                    _il__repos="${_il__repos} --repo=${_repo_in__name} --setopt=${_repo_in__name}.metalink= --setopt=${_repo_in__name}.mirrorlist= --setopt=${_repo_in__name}.baseurl=${_repo_in__url}"
+                fi
+            done
+            _install_line__out="dnf install -y --setopt=install_weak_deps=False${_il__repos} ${1}-${2} && dnf clean all" ;;
+        zypper)
+            _il__add=""; _il__repos=""
+            for _il__repo in ${REPOS}; do
+                _repo_in "${_il__repo}" || return 1
+                _util_is_url "${_repo_in__url}" || return 1
+                _il__add="${_il__add}zypper --non-interactive addrepo ${_repo_in__url} ${SELF_NAME}-${_repo_in__name} && "
+                _il__repos="${_il__repos} --repo ${SELF_NAME}-${_repo_in__name}"
+            done
+            _install_line__out="${_il__add}zypper --non-interactive install --no-recommends${_il__repos} ${1}=${2} && zypper clean --all" ;;
+        *) return 1 ;;
+    esac
+}
+

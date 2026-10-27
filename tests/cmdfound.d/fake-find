@@ -1,3 +1,4 @@
+#!/bin/sh
 #a stand-in for find, for the cmdfound tests, copied as find where a test needs
 #a find with no GNU extensions. It refuses -lname and -ilname the way busybox's
 #find does - nothing on stdout, "find: unrecognized: -lname" on stderr, status

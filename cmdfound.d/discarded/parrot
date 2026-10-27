@@ -1,0 +1,3 @@
+#description: parrot - Parrot Security OS, apt
+#decided: 2026-10-26
+#why: no command index and no Contents; its own packages are anonsurf, themes and libraries, its tools are Kali's

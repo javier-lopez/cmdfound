@@ -1,0 +1,3 @@
+#description: spack - a package manager for HPC
+#decided: 2026-10-26
+#why: binary caches (spack install --cache-only, signed) cover 1,368 of 9,116 recipes, x86_64_v3 only, and add 931 commands after the planned distros, mostly HEP/HPC; needs spack and python in the image

@@ -3,8 +3,11 @@ AMVERSION="9.9-1"
 #a stand-in for AM, for the cmdfound tests. It behaves like AppMan where
 #cmdfound depends on it and nowhere else: -y -i APP installs APP where
 #appman_location and the XDG variables say, links it in XDG_BIN_HOME, leaves a
-#desktop file and writes a remove script naming all of it, as AM does; nolibfuse
-#APP does nothing. FAKE_AM_LOG, when set, records each call and the HOME it saw.
+#desktop file and writes a remove script naming all of it, as AM does. An app
+#named in FAKE_AM_APPIMAGE is installed as an AppImage: a file with the magic
+#and nothing to run, which nolibfuse APP rewrites into the program, as AM's
+#conversion rewrites the file; nolibfuse on any other app does nothing.
+#FAKE_AM_LOG, when set, records each call and the HOME it saw.
 #FAKE_AM_ENV records what AM's own curl, wget, bash and zsh would read of the
 #user's: what a curl run the way AM runs it makes of FAKE_AM_URL, a file, with
 #whatever curl configuration it finds, then WGETRC, BASH_ENV and ZDOTDIR, the
@@ -21,7 +24,10 @@ case "${1}" in
         app="${2}"; apps="${appman_location}"; bin="${XDG_BIN_HOME}"; data="${XDG_DATA_HOME}"
         [ -n "${app}" ] && [ -n "${apps}" ] && [ -n "${bin}" ] && [ -n "${data}" ] || exit 1
         mkdir -p "${apps}/${app}" "${bin}" "${data}/applications" || exit 1
-        printf '#!/bin/sh\nprintf "%%s\\n" "%s ran"\n' "${app}" > "${apps}/${app}/${app}"
+        case " ${FAKE_AM_APPIMAGE} " in
+            *" ${app} "*) printf '\177ELF\002\001\001\000AI\002\n' > "${apps}/${app}/${app}" ;;
+            *) printf '#!/bin/sh\nprintf "%%s\\n" "%s ran"\n' "${app}" > "${apps}/${app}/${app}" ;;
+        esac
         chmod 755 "${apps}/${app}/${app}"
         printf "%s\n" "1.2.3" > "${apps}/${app}/version"
         ln -sf "${apps}/${app}/${app}" "${bin}/${app}"
@@ -32,7 +38,11 @@ case "${1}" in
         mkdir -p "${apps}/appman/modules" && : > "${apps}/appman/modules/install.am"
         log "install ${app} HOME=${HOME}"
         ;;
-    nolibfuse) log "nolibfuse ${2}" ;;
+    nolibfuse)
+        log "nolibfuse ${2}"
+        case " ${FAKE_AM_APPIMAGE} " in
+            *" ${2} "*) printf '#!/bin/sh\nprintf "%%s\\n" "%s ran"\n' "${2}" > "${appman_location}/${2}/${2}" ;;
+        esac ;;
     *) exit 1 ;;
 esac
 exit 0

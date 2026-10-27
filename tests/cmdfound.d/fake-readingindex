@@ -1,0 +1,26 @@
+#!/bin/sh
+#a channel whose catalog arrives at once and is read for two seconds after.
+#Past the download it says so and is not cut short, as the real ones are not:
+#a stop then would only throw the reading away. It only has names that start
+#with "cat"
+
+#this file's own name: $0 is not this file when the resolver sources a
+#channel, and CMDFOUND_CHANNEL_FILE is what says which file it is in
+SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
+SELF_NAME="${SELF##*/}"
+h="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+
+case "${1}" in
+    meta)  printf "%s\n" "kind=artifact" "confines=no" "describes=self" ;;
+    index) [ X"${2}" = X"bytes" ] && { printf "%s\n" "bytes=14"; exit 0; }
+           mkdir -p "${h}/index" && printf "%s\n" "catname" "catread" > "${h}/index/names.part"
+           _api_catalog_arrived
+           i=0; while [ "${i}" -lt "40" ]; do sleep 0.05; i=$((i + 1)); done
+           mv "${h}/index/names.part" "${h}/index/names"
+           printf "%s\n" "packages=2" "bytes=14" ;;
+    probe) case "${2}" in cat*) ;; *) exit 1 ;; esac
+           [ -f "${h}/index/names" ] || { printf "%s\n" "unreachable=no local catalog yet" "needs=index"; exit 2; }
+           grep -x "${2}" "${h}/index/names" >/dev/null || exit 1
+           printf "%s\n" "version=1.0" "bytes=10" ;;
+    *) exit 1 ;;
+esac

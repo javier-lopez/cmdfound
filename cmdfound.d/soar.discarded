@@ -1,3 +1,0 @@
-#description: soar - pkgforge's static programs: bincache, pkgcache and soarpkgs
-#decided: 2026-09-17
-#why: bincache and pkgcache are frozen and unsigned; soarpkgs adds 63 commands, worth a look if it grows

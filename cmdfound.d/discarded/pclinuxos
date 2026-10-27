@@ -1,0 +1,3 @@
+#description: pclinuxos - PCLinuxOS, apt-rpm
+#decided: 2026-10-26
+#why: no official image, a release file with MD5 sums only and unsigned rpms; about 1,100 commands after rosa, from the same Mandriva lineage

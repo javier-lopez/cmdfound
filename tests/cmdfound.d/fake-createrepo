@@ -1,0 +1,72 @@
+#!/bin/sh
+#a stand-in for createrepo_c, for the cmdfound tests: writes DIR/repodata with
+#a primary.xml laid out line for line as createrepo_c lays it out, compressed
+#with zst or gz, and a repomd.xml naming it by its sha256 or sha512
+#
+#  sh fake-createrepo SPEC DIR SUM COMPRESSION
+#
+#SPEC has a package a line, its fields separated by |, lists by commas:
+#  name|epoch|ver|rel|arch|size|requires|provides|files|summary|recommends
+#a file ending in / is a directory. Each package also has a description
+#that starts a line with an escaped <name>, as no real one is read
+
+spec="${1}"; dir="${2}"; sum="${3}"; comp="${4}"
+mkdir -p "${dir}/repodata" || exit 1
+awk -F'|' '
+    function entries(tag, list,   n, a, i) {
+        if (list == "") return
+        n = split(list, a, ",")
+        printf("    <rpm:%s>\n", tag)
+        for (i = 1; i <= n; i++) printf("      <rpm:entry name=\"%s\"/>\n", a[i])
+        printf("    </rpm:%s>\n", tag)
+    }
+    BEGIN {
+        print "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        print "<metadata xmlns=\"http://linux.duke.edu/metadata/common\" xmlns:rpm=\"http://linux.duke.edu/metadata/rpm\">"
+    }
+    {
+        printf("<package type=\"rpm\">\n  <name>%s</name>\n  <arch>%s</arch>\n", $1, $5)
+        printf("  <version epoch=\"%s\" ver=\"%s\" rel=\"%s\"/>\n", $2, $3, $4)
+        printf("  <checksum type=\"sha256\" pkgid=\"YES\">0</checksum>\n  <summary>%s</summary>\n", $10)
+        printf("  <description>%s\n  &lt;name&gt;not-a-package&lt;/name&gt;</description>\n", $10)
+        printf("  <packager>Fixture</packager>\n  <url>https://example.invalid</url>\n  <time file=\"1\" build=\"1\"/>\n")
+        printf("  <size package=\"%s\" installed=\"%d\" archive=\"%d\"/>\n", $6, $6 * 3, $6 * 3)
+        printf("  <location href=\"Packages/%s-%s-%s.%s.rpm\"/>\n  <format>\n    <rpm:license>MIT</rpm:license>\n", $1, $3, $4, $5)
+        printf("    <rpm:provides>\n      <rpm:entry name=\"%s\" flags=\"EQ\" epoch=\"%s\" ver=\"%s\" rel=\"%s\"/>\n", $1, $2, $3, $4)
+        n = split($8, a, ",")
+        for (i = 1; i <= n; i++) printf("      <rpm:entry name=\"%s\"/>\n", a[i])
+        printf("    </rpm:provides>\n")
+        entries("requires", $7)
+        entries("recommends", $11)
+        n = split($9, a, ",")
+        for (i = 1; i <= n; i++) {
+            if (a[i] ~ /\/$/) printf("    <file type=\"dir\">%s</file>\n", substr(a[i], 1, length(a[i]) - 1))
+            else printf("    <file>%s</file>\n", a[i])
+        }
+        printf("  </format>\n</package>\n")
+    }
+    END { print "</metadata>" }' "${spec}" > "${dir}/primary.xml" || exit 1
+case "${comp}" in
+    zst) zstd -q -f -o "${dir}/primary.xml.c" "${dir}/primary.xml" || exit 1 ;;
+    gz)  gzip -n -c "${dir}/primary.xml" > "${dir}/primary.xml.c" || exit 1 ;;
+esac
+digest="$("${sum}sum" "${dir}/primary.xml.c" | awk '{print $1}')"
+href="repodata/${digest}-primary.xml.${comp}"
+mv "${dir}/primary.xml.c" "${dir}/${href}" && rm -f "${dir}/primary.xml"
+printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+    '<repomd xmlns="http://linux.duke.edu/metadata/repo" xmlns:rpm="http://linux.duke.edu/metadata/rpm">' \
+    '  <revision>1</revision>' \
+    '  <data type="filelists">' \
+    "    <checksum type=\"${sum}\">0000</checksum>" \
+    '    <location href="repodata/0000-filelists.xml.gz"/>' \
+    '    <size>1</size>' \
+    '  </data>' \
+    '  <data type="primary">' \
+    "    <checksum type=\"${sum}\">${digest}</checksum>" \
+    "    <open-checksum type=\"${sum}\">0000</open-checksum>" \
+    "    <location href=\"${href}\"/>" \
+    '    <timestamp>1</timestamp>' \
+    "    <size>$(wc -c < "${dir}/${href}" | awk '{print $1}')</size>" \
+    '    <open-size>1</open-size>' \
+    '  </data>' \
+    '</repomd>' > "${dir}/repodata/repomd.xml"

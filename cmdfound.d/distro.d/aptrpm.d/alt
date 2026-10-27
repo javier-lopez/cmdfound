@@ -1,0 +1,25 @@
+#description: cmdfound channel - ALT Linux packages, installed by apt-get inside the image
+#usage: alt meta | alt index [bytes] | alt search WORDS...
+#       alt probe NAME [VER] | alt recipe PACKAGE VER [PROGRAM]
+#covers: alt-sisyphus - Sisyphus has 3,076 names more than p11 and 2,080 fewer; p11 is the branch the image follows (2026-10-26)
+
+#ALT's row in the aptrpm channel: the p11 branch, its classic component for
+#this machine and for noarch. The release files are signed and apt checks
+#them, and the rpms, with the keys the image has
+DISTRO="ALT"
+RELEASE="p11"
+DISTRO_RELEASE="${DISTRO} ${RELEASE}"
+ARCHES="x86_64 aarch64 i586"
+#http, as the image has it: it has no ca-certificates, and the release is signed.
+#One of ALT's mirrors and not ftp.altlinux.org, which gave 35 KB/s: the p11
+#pkglist, 29.7 MB, took 17 minutes there and 2.7 s here (2026-10-27)
+MIRROR="${CMDFOUND_ALT_MIRROR:-http://distrib-coffee.ipsl.jussieu.fr/pub/linux/altlinux}"
+BRANCH="${RELEASE}/branch"
+#the vendor the image's apt knows the branch's key by
+VENDOR="p11"
+REGISTRY="${CMDFOUND_ALT_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="library/alt"
+TAG="${RELEASE}"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#the image's packages on 2026-10-26, rpm -qa
+BASE="alt-gpgkeys alt-os-release altlinux-repos apt apt-conf-branch apt-https basesystem bash bash5 bashrc branding-alt-container-notes branding-alt-container-release bzip2 bzlib common-licenses control coreutils cpio diffutils etcskel fakeroot filesystem findutils gawk getopt glibc-core glibc-preinstall gnupg grep gzip iproute2 libacl libapt libattr libaudit-common libaudit1 libblkid libcap libcap-ng libcap-utils libcrypt libdb4.7 libelf libffi8 libgcc1 libgcrypt20 libgmp10 libgnutls30 libgpg-error libgpm libhogweed6 libidn2 libiptables liblua5.3 liblzma libmnl libmount libncursesw6 libnettle8 libp11-kit libpam0 libpasswdqc libpcre2 libpopt libreadline8 librpm7 libselinux libsha1detectcoll1 libshell libsmartcols libstdc++6 libtasn1 libtcb libtic6 libtinfo6 libudev1 libunistring2 libuuid libzstd nss_tcb pam pam-config pam-config-control pam0_mktemp pam0_passwdqc pam0_tcb pam0_userpass passwdqc-control perl-base perl-parent rootfiles rpm sed setarch setproctitle setup sh sh5 shadow-convert shadow-utils tar tcb-utils terminfo termutils util-linux util-linux-control vim-minimal vitmp xz zlib zstd"

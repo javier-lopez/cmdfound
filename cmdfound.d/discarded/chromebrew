@@ -1,0 +1,3 @@
+#description: chromebrew - Chromebrew, packages for ChromeOS
+#decided: 2026-10-26
+#why: built for ChromeOS under /usr/local and with no container image; 431 commands after the planned distros

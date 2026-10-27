@@ -1,0 +1,25 @@
+#description: cmdfound channel - Fedora packages, installed by dnf inside the image
+#usage: fedora meta | fedora index [bytes] | fedora search WORDS...
+#       fedora probe NAME [VER] | fedora recipe PACKAGE VER [PROGRAM]
+#covers: fedora-rawhide - Fedora 44 has all but 847 of rawhide's 34,365 commands (2026-10-26)
+
+#Fedora's row in the rpm channel: one release, as published and as updated
+#since. The rpms are signed and dnf checks them with the image's keys;
+#repomd.xml is not signed, dnf trusts it through the metalink, and here the
+#mirror is named instead, so that dnf reads what the catalog was made from
+DISTRO="Fedora"
+RELEASE="44"
+DISTRO_RELEASE="${DISTRO} ${RELEASE}"
+ARCHES="x86_64 aarch64 ppc64le s390x"
+MIRROR="${CMDFOUND_FEDORA_MIRROR:-https://dl.fedoraproject.org/pub/fedora/linux}"
+REPOS_AT="${MIRROR}"
+#each a dnf repository of the image, named as it names it
+REPOS="fedora=releases/${RELEASE}/Everything/\$basearch/os updates=updates/${RELEASE}/Everything/\$basearch"
+INSTALLER="dnf"
+REGISTRY="${CMDFOUND_FEDORA_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="library/fedora"
+TAG="${RELEASE}"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#what the image was made with, dnf repoquery --userinstalled on 2026-10-26;
+#what they require is had too
+BASE="bash bzip2 coreutils dnf5 dnf5-plugins fedora-release-container filesystem gawk glibc-minimal-langpack gzip rootfiles rpm shadow-utils sudo systemd-standalone-sysusers tar tzdata util-linux-core vim-minimal xz zstd"

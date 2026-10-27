@@ -1,0 +1,3 @@
+#description: gentoo - Gentoo, source based
+#decided: 2026-10-26
+#why: it compiles, its binhost covers part of the tree, and gentoo/stage3 is 403 MB

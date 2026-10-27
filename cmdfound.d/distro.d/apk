@@ -1,0 +1,133 @@
+#description: cmdfound library - a catalog of apk packages, installed by apk inside the distro's image
+#usage: loaded by distro after a row of distro.d/apk.d/, which sets DISTRO,
+#       DISTRO_RELEASE, ARCHES, MIRROR, REPOS_AT, REPOS, EVERY_VERSION, BASE,
+#       IMAGE, REGISTRY, REPOSITORY and TAG
+FORMAT="apk"
+NEEDS=""
+INSTALLER="apk"
+
+_index_bytes() {
+    for _ib__repo in ${REPOS}; do
+        printf "%s\\n" "${REPOS_AT}/${_ib__repo}/${arch}/APKINDEX.tar.gz"
+    done | _heads_bytes
+}
+
+_fetch() {
+    #each APKINDEX.tar.gz, whole: its signature is apk's to check, in the image
+    for _fe__repo in ${REPOS}; do
+        _catalog_file "${REPOS_AT}/${_fe__repo}/${arch}/APKINDEX.tar.gz" \
+            "${CH}/index/${_fe__repo}.APKINDEX-${arch}.tar.gz" "${DISTRO_RELEASE}'s ${_fe__repo} catalog for ${arch}"
+    done
+}
+
+_rows() {
+    #the rows of every APKINDEX, for _priced
+    #    P:figlet V:2.2.5-r3 p:cmd:figlet  =>  cmd   figlet      figlet
+    #                                          pkg   figlet      2.2.5-r3  ...  main  ...
+    #                                          prov  cmd:figlet  figlet
+    #
+    #An index with EVERY_VERSION is read twice: first for the newest version
+    #of each name, then for what that one says. Alpine's is read once
+    #TAR_OPTIONS emptied: set, it would change what comes out
+    set --
+    for _ro__repo in ${REPOS}; do
+        _unpacked "${CH}/index/${_ro__repo}.APKINDEX-${arch}.tar.gz" | TAR_OPTIONS= tar -xOf - APKINDEX > "${new}.${_ro__repo}" || return 1
+        set -- "${@}" "${new}.${_ro__repo}"
+    done
+    _ro__pass="2"
+    if [ -n "${EVERY_VERSION}" ]; then
+        _ro__pass="1"
+        set -- "${@}" pass=2 "${@}"
+    fi
+    LC_ALL=C awk -v repos="${REPOS}" -v pass="${_ro__pass}" -v newest="${EVERY_VERSION}" '
+    #apk'\''s order of versions, as far as Alpine and Wolfi use it: the numbers,
+    #a letter, each _suffix (alpha beta pre rc come before none, cvs svn git hg p
+    #after), then -r. Turned into numbers compared one by one
+    #    1.8.2-r3 > 1.8.1-r6 > 1.6-r2    1.2_rc1 < 1.2 < 1.2_p1 < 1.2a < 1.2.1
+    function vkey(v, key,   n, i, c, s, a, m, sfx, l, r) {
+        n = 0; r = 0; l = 0
+        if (match(v, /-r[0-9]+$/)) { r = substr(v, RSTART + 2) + 0; v = substr(v, 1, RSTART - 1) }
+        m = split(v, s, "_")
+        if (match(s[1], /[a-z]$/)) { l = index("abcdefghijklmnopqrstuvwxyz", substr(s[1], RSTART, 1)); s[1] = substr(s[1], 1, RSTART - 1) }
+        c = split(s[1], a, ".")
+        for (i = 1; i <= c; i++) key[++n] = a[i] + 0
+        key[++n] = -1; key[++n] = l
+        for (i = 2; i <= m; i++) {
+            match(s[i], /^[a-z]*/); sfx = substr(s[i], 1, RLENGTH)
+            key[++n] = (sfx in rank) ? rank[sfx] : 0; key[++n] = substr(s[i], RLENGTH + 1) + 0
+        }
+        key[++n] = rank[""]; key[++n] = 0; key[++n] = r
+        return n
+    }
+    function newer(a, b,   ka, kb, na, nb, i) {
+        na = vkey(a, ka); nb = vkey(b, kb)
+        for (i = 1; i <= na && i <= nb; i++) if (ka[i] != kb[i]) return ka[i] > kb[i]
+        return na > nb
+    }
+    function flush(   n, i, t, a, neg) {
+        if (cur == 1) {
+            if (name != "" && (!((name) in best) || newer(ver, best[name]))) best[name] = ver
+        } else if (name != "" && (newest == "" || (ver == best[name] && !((name) in done)))) {
+            done[name] = 1
+            if (size !~ /^[0-9]+$/) size = 0
+            gsub(/\t/, " ", desc)
+            printf("pkg\t%s\t%s\t%s\t%s\t%s\n", name, ver, size, repo, desc)
+            n = split(provides, a, " ")
+            for (i = 1; i <= n; i++) {
+                t = a[i]; sub(/=.*$/, "", t)
+                if (t == "") continue
+                printf("prov\t%s\t%s\n", t, name)
+                if (substr(t, 1, 4) == "cmd:" && length(t) > 4) printf("cmd\t%s\t%s\n", substr(t, 5), name)
+            }
+            n = split(deps, a, " ")
+            for (i = 1; i <= n; i++) {
+                #a conflict is not something to install, and which version
+                #is apk'\''s to pick
+                t = a[i]
+                if (substr(t, 1, 1) == "!") continue
+                sub(/[<>=~].*$/, "", t)
+                if (t != "") printf("dep\t%s\t%s\n", name, t)
+            }
+            n = split(installif, a, " ")
+            for (i = 1; i <= n; i++) {
+                #here a ! is kept: it asks for a name not to be there
+                t = a[i]; neg = ""
+                if (substr(t, 1, 1) == "!") { neg = "!"; t = substr(t, 2) }
+                sub(/[<>=~].*$/, "", t)
+                if (t != "") printf("inst\t%s\t%s%s\n", name, neg, t)
+            }
+        }
+        name = ""; ver = ""; size = ""; desc = ""; deps = ""; provides = ""; installif = ""
+    }
+    BEGIN {
+        split(repos, repo_of, " ")
+        rank["alpha"] = 1; rank["beta"] = 2; rank["pre"] = 3; rank["rc"] = 4; rank[""] = 5
+        rank["cvs"] = 6; rank["svn"] = 7; rank["git"] = 8; rank["hg"] = 9; rank["p"] = 10
+    }
+    #pass=2 between the two readings is set before the first line after it
+    FNR == 1 { flush(); if (cur != pass) files = 0; cur = pass; repo = repo_of[++files] }
+    { sub(/\r$/, "") }
+    $0 == "" { flush(); next }
+    {
+        k = substr($0, 1, 2); v = substr($0, 3)
+        if (k == "P:") name = v
+        else if (k == "V:") ver = v
+        else if (cur == 1) next
+        else if (k == "S:") size = v
+        else if (k == "T:") desc = v
+        else if (k == "D:") deps = v
+        else if (k == "p:") provides = v
+        else if (k == "i:") installif = v
+    }
+    END { flush() }' "${@}"
+}
+
+_install_line() {
+    #$1 => a package, $2 => its version: one apk line against this mirror alone
+    _il__repos=""
+    for _il__repo in ${REPOS}; do
+        _il__repos="${_il__repos} -X ${REPOS_AT}/${_il__repo}"
+    done
+    _install_line__out="apk add --no-cache --repositories-file /dev/null${_il__repos} ${1}=${2}"
+}
+

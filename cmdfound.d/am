@@ -2,9 +2,11 @@
 #description: cmdfound channel - AM's catalog of AppImages and portable programs, installed by AM
 #usage: am meta | am index [bytes] | am search WORDS...
 #       am probe NAME | am locate NAME | am obtain NAME
-#covers: appimage.github.io - a list of AppImages, AM's catalog has them
+#covers: appimage.github.io - a list of AppImages; AM's catalog has 2,523 of its 3,342 names, the other 819 are not reached (2026-10-26)
 
 REPO="${CMDFOUND_AM_REPO:-https://raw.githubusercontent.com/ivan-hc/AM/main}"
+#where the releases an app's script reads are, as its pages show them
+GITHUB="${CMDFOUND_AM_GITHUB:-https://github.com}"
 #CMDFOUND_CHANNEL_FILE and not $0: the resolver sources this, and $0 is its own
 SELF="${CMDFOUND_CHANNEL_FILE:-${0}}"
 SELF_NAME="${SELF##*/}"
@@ -63,6 +65,15 @@ _run_tool() {
     )
 }
 
+_is_appimage() {
+    #$1 => a program AM installed. 0 when it is an AppImage, by the magic AM
+    #itself reads: ELF, and AI at its eighth byte. A static binary is not one
+    case "$(od -An -N10 -tx1 "${1}" 2>/dev/null | tr -d ' \n')" in
+        ??454c46????????4149) return 0 ;;
+    esac
+    return 1
+}
+
 _libfuse2() {
     _api_reads_yes "${CMDFOUND_LIBFUSE2}" && return 0
     _api_reads_no "${CMDFOUND_LIBFUSE2}" && return 1
@@ -89,8 +100,7 @@ _index() {
     list="${APPSLISTDB:-${REPO}/programs/$(_platform)-apps}"
     _api_catalog_fetch "${list}" "${kept}" AM
     bytes="$(wc -c < "${part}" | awk '{print $1}')"
-    #not cut short from here: the fetched part would stay behind
-    trap '' TERM INT HUP
+    _api_catalog_arrived
     awk '
         /^◆ [a-z0-9][a-z0-9._+-]* : / {
             name = $2; desc = $0
@@ -129,9 +139,59 @@ _probe() {
     _platform >/dev/null || exit 1
     [ -s "${INDEX}" ] || _api_answer_no_index
     awk -F'\t' -v n="${name}" '$1 == n {f = 1; exit} END {exit !f}' "${INDEX}" || exit 1
-    #version and size are known only to AM's script while it runs
+    #the version is known only to AM's script while it runs; the size, most
+    #often, to the github release the script reads
     printf "%s\\n" "version=latest" "requires=am:${TOOL_NAME}"
+    if _size_hint "${name}"; then
+        printf "%s\\n" "bytes=${_size_hint__out}" "estimate=yes"
+    fi
     exit 0
+}
+
+_size_hint() {
+    #$1 => an app. What its script downloads when, as most do, it takes an
+    #AppImage from a github repository's releases: the first of the latest
+    #release that names no other cpu, as its page shows the size. Read from
+    #github's pages and not its api, which allows 60 questions an hour that
+    #aqua and github need. 1 for a script that reads none. Kept a day
+    #    hive  =>  morapelker/hive  =>  Hive-1.2.49.AppImage, 337 MB  =>  __out 353370112
+    #the x86_64 scripts are the ones that read releases the same way
+    [ X"$(_platform)" = X"x86_64" ] || return 1
+    _sh__f="${CH}/cache/sizes/${1}"
+    if _api_is_fresh "${_sh__f}"; then
+        IFS= read -r _size_hint__out < "${_sh__f}"
+        _util_is_number "${_size_hint__out}"
+        return
+    fi
+    _util_mkdir_p "${_sh__f%/*}" || return 1
+    _sh__repo="$(_api_fetcher "${REPO}/programs/$(_platform)/${1}" 2>/dev/null | \
+        grep -o 'api\.github\.com/repos/[A-Za-z0-9._-]*/[A-Za-z0-9._-]*/releases' | head -1)"
+    _sh__repo="${_sh__repo#api.github.com/repos/}"; _sh__repo="${_sh__repo%/releases}"
+    _size_hint__out=""
+    if [ -n "${_sh__repo}" ] && _api_latest_tag_in "${GITHUB}/${_sh__repo}/releases" && \
+       _api_fetcher_answered "${GITHUB}/${_sh__repo}/releases/expanded_assets/${_api_latest_tag_in__out}" "${_sh__f}.$$"; then
+        #an asset's link, then its size: the size after the link taken
+        _size_hint__out="$(awk '
+            { page = page " " $0 }
+            END {
+                s = page
+                while (match(s, /releases\/download\/[^"]*"|>[0-9.]+ (B|KB|MB|GB)</)) {
+                    m = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+                    if (m ~ /^releases/) {
+                        n = tolower(m)
+                        want = (n ~ /appimage"$/ && n !~ /i386|i686|armhf|aarch64|arm64|armv7l/)
+                        continue
+                    }
+                    if (!want) continue
+                    split(substr(m, 2, length(m) - 2), w, " ")
+                    k = (w[2] == "GB") ? 1073741824 : (w[2] == "MB") ? 1048576 : (w[2] == "KB") ? 1024 : 1
+                    printf("%d\n", w[1] * k); exit
+                }
+            }' "${_sh__f}.$$")"
+    fi
+    rm -f "${_sh__f}.$$"
+    printf "%s\\n" "${_size_hint__out}" | _util_write_aside "${_sh__f}"
+    _util_is_number "${_size_hint__out}"
 }
 
 _locate() {
@@ -181,7 +241,8 @@ _obtain() {
     if [ ! -x "${CH}/bin/${app}" ]; then
         _api_answer_failed "AM installed ${app} but left no program called ${app}"
     fi
-    if ! _libfuse2; then
+    #only an AppImage needs libfuse2, and AM refuses to convert anything else
+    if _is_appimage "${CH}/bin/${app}" && ! _libfuse2; then
         _api_shown "${log}" _run_tool -y nolibfuse "${app}" || :
     fi
 

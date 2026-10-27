@@ -82,7 +82,7 @@ jobs:
   # 2 of 8. The same Ubuntu with mawk in awk's place. Three comments in the
   # tree claim their awk programs read the same under gawk, mawk, nawk and
   # busybox awk - aqua:178 over 2303 packages, conda-forge:246 over the whole
-  # of channeldata.json, alpine:636 about the order mawk creates an array
+  # of channeldata.json, apk:211 about the order mawk creates an array
   # element in - and nothing in the repository has ever checked one of them:
   # the block runs with whatever awk the machine has.
   gnu-dash-mawk:
@@ -119,7 +119,6 @@ jobs:
     name: '3 ubuntu: bash as /bin/sh'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Make /bin/sh bash
@@ -170,7 +169,6 @@ jobs:
     name: '5 ubuntu: neither curl nor wget'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Take both fetchers out of the PATH the block gets
@@ -232,9 +230,11 @@ jobs:
       image: alpine:3.22
     steps:
       - name: Install git to fetch with, and what the block's own fixtures need
-        run: apk add --no-cache git xz bash
+        run: apk add --no-cache git xz zstd openssl bash
       - name: Fetch this revision
-        run: sh -c 'set -e; if [ -d .git ]; then git config --global --add safe.directory "$(pwd)"; else git init -q .; git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"; git -c protocol.version=2 fetch -q --depth 1 origin "${GITHUB_SHA}"; git checkout -q FETCH_HEAD; fi'
+        # the workspace is the runner's user's and this is root: git refuses
+        # every command in it, the first ones included, unless it is declared
+        run: sh -c 'set -e; git config --global --add safe.directory "$(pwd)"; if [ ! -d .git ]; then git init -q .; git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"; git -c protocol.version=2 fetch -q --depth 1 origin "${GITHUB_SHA}"; git checkout -q FETCH_HEAD; fi'
       - name: Record what answers each name here
         run: sh .github/scripts/userland.sh '6 alpine busybox-wget'
       - name: Run the cmdfound block
@@ -253,9 +253,11 @@ jobs:
       image: alpine:3.22
     steps:
       - name: Install git, curl, and what the block's own fixtures need
-        run: apk add --no-cache git xz bash curl
+        run: apk add --no-cache git xz zstd openssl bash curl
       - name: Fetch this revision
-        run: sh -c 'set -e; if [ -d .git ]; then git config --global --add safe.directory "$(pwd)"; else git init -q .; git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"; git -c protocol.version=2 fetch -q --depth 1 origin "${GITHUB_SHA}"; git checkout -q FETCH_HEAD; fi'
+        # the workspace is the runner's user's and this is root: git refuses
+        # every command in it, the first ones included, unless it is declared
+        run: sh -c 'set -e; git config --global --add safe.directory "$(pwd)"; if [ ! -d .git ]; then git init -q .; git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"; git -c protocol.version=2 fetch -q --depth 1 origin "${GITHUB_SHA}"; git checkout -q FETCH_HEAD; fi'
       - name: Record what answers each name here
         run: sh .github/scripts/userland.sh '7 alpine busybox-curl'
       - name: Run the cmdfound block
@@ -268,7 +270,7 @@ jobs:
 #  # cmdfound:642's guard for a date that prints %N as a literal N;
 #  # confined-launch:365's id -u/-g/-G fallback, which is the only path where
 #  # there is no /proc/self/status; cmdfound:2248's find -lname; aqua:455's
-#  # sed \x1b; alpine:604's tar -xzOf over two concatenated gzip streams read by
+#  # sed \x1b; apk:189's tar -xzOf over two concatenated gzip streams read by
 #  # libarchive; and confined-launch:447's `export -p` printing `declare -x`.
 #  #
 #  # It is expected to fail early and for a reason that is not a bug in

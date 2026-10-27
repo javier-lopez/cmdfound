@@ -1,3 +1,0 @@
-#description: spack - a package manager for HPC
-#decided: 2026-09-17
-#why: builds from source, and cmdfound never compiles

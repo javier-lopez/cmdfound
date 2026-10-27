@@ -1,0 +1,24 @@
+#description: cmdfound channel - BlackArch packages, installed by pacman inside the image
+#usage: blackarch meta | blackarch index [bytes] | blackarch search WORDS...
+#       blackarch probe NAME [VER] | blackarch recipe PACKAGE VER [PROGRAM]
+#covers: athena - Athena OS takes its tools from the BlackArch repository; its own 90 packages are desktop and configuration (2026-10-26)
+
+#BlackArch's row in the pacman channel: its own repository, signed, read for
+#commands, over Arch's, whose .db say what its packages pull in. The image has
+#both configured and blackarch-keyring in it
+DISTRO="BlackArch"
+DISTRO_RELEASE="${DISTRO}"
+ARCHES="x86_64"
+MIRROR="${CMDFOUND_BLACKARCH_MIRROR:-https://www.blackarch.org/blackarch}"
+ARCH_MIRROR="${CMDFOUND_ARCH_MIRROR:-https://geo.mirror.pkgbuild.com}"
+REPOS="core=${ARCH_MIRROR} extra=${ARCH_MIRROR} multilib=${ARCH_MIRROR} blackarch=${MIRROR}"
+#the repositories whose commands are answered; Arch's are the arch channel's
+COMMANDS="blackarch"
+#each mirrorlist of the image, and the server it is pointed at
+LISTS="/etc/pacman.d/mirrorlist=${ARCH_MIRROR} /etc/pacman.d/blackarch-mirrorlist=${MIRROR}"
+REGISTRY="${CMDFOUND_BLACKARCH_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="blackarchlinux/blackarch"
+TAG="latest"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#the image's packages on 2026-10-26, pacman -Qq
+BASE="acl archlinux-keyring attr audit base bash binutils blackarch-keyring brotli bzip2 ca-certificates ca-certificates-mozilla ca-certificates-utils coreutils cryptsetup curl dbus dbus-broker dbus-broker-units dbus-units device-mapper e2fsprogs expat file filesystem findutils gawk gcc-libs gdbm gettext glib2 glibc gmp gnulib-l10n gnupg gnutls gpgme grep gzip hwdata iana-etc icu iproute2 iptables iputils jansson json-c kbd keyutils kmod krb5 leancrypto libarchive libasan libassuan libatomic libbpf libcap libcap-ng libelf libevent libffi libgcc libgcrypt libgfortran libgomp libgpg-error libhwasan libidn2 libksba libldap liblsan libmakepkg-dropins libmnl libnetfilter_conntrack libnfnetlink libnftnl libnghttp2 libnghttp3 libngtcp2 libnl libnsl libobjc libp11-kit libpcap libpsl libquadmath libsasl libseccomp libsecret libssh2 libstdc++ libsysprof-capture libtasn1 libtirpc libtsan libubsan libunistring libusb libverto libxcrypt libxml2 licenses linux-api-headers lmdb lz4 mpfr ncurses nettle nftables npth openssl p11-kit pacman pacman-mirrorlist pam pambase pciutils pcre2 pinentry popt procps-ng psmisc readline sed shadow sqlite systemd systemd-libs systemd-sysvcompat tar tpm2-tss tzdata util-linux util-linux-libs xz zlib zstd"

@@ -338,8 +338,7 @@ _index() {
     kept="${CH}/index/pantry.tar.xz.part"; part="${kept}.$$"; new="${CH}/index/pantry.$$"
     _api_catalog_fetch "${DIST}/pantry.tar.xz" "${kept}" pkgx
     bytes="$(wc -c < "${part}" | awk '{print $1}')"
-    #stopped from here on, the old pantry could be left half replaced
-    trap '' TERM INT HUP
+    _api_catalog_arrived
     #a user's TAR_OPTIONS=--to-stdout would leave the pantry empty
     _util_mkdir_p "${new}" && TAR_OPTIONS= tar -xJf "${part}" -C "${new}" 2> "${new}.err"
     rc="${?}"; rm -f "${part}"

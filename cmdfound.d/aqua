@@ -176,8 +176,7 @@ _index() {
     part="${kept}.$$"
     _api_catalog_fetch "${REGISTRY}" "${kept}" aqua
     bytes="$(wc -c < "${part}" | awk '{print $1}')"
-    #not cut short from here: the old index could be left half replaced
-    trap '' TERM INT HUP
+    _api_catalog_arrived
     _indexer < "${part}" | LC_ALL=C sort -u > "${new}"
     rm -f "${part}"
 

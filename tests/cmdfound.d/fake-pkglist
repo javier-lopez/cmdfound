@@ -1,0 +1,36 @@
+#!/bin/sh
+#writes an ALT pkglist for the tests, rpm headers one after another, to stdout.
+#A package a line on stdin:
+#    name|epoch|version|release|size|summary|provides|requires|files
+#lists comma separated, files as full paths. Tags written: 1000 name, 1001
+#version, 1002 release, 1003 epoch, 1004 summary, 1047 provides, 1049
+#requires, 1116-1118 files, 1000001 size; every byte as an octal escape, so
+#that printf alone writes it
+LC_ALL=C awk -F'|' '
+function u32(v) { put(int(v / 16777216) % 256); put(int(v / 65536) % 256); put(int(v / 256) % 256); put(v % 256) }
+function put(c) { out = out sprintf("\\%03o", c) }
+function str(s,   i) { for (i = 1; i <= length(s); i++) dat = dat sprintf("\\%03o", ord[substr(s, i, 1)]); dat = dat "\\000"; dlen += length(s) + 1 }
+function dint(v) { dat = dat sprintf("\\%03o\\%03o\\%03o\\%03o", int(v / 16777216) % 256, int(v / 65536) % 256, int(v / 256) % 256, v % 256); dlen += 4 }
+function tag(t, ty, n) { tags[++nt] = t; types[nt] = ty; offs[nt] = dlen; cnts[nt] = n }
+BEGIN { for (i = 1; i < 256; i++) ord[sprintf("%c", i)] = i }
+{
+    nt = 0; dat = ""; dlen = 0; out = ""
+    tag(1000, 6, 1); str($1)
+    tag(1001, 6, 1); str($3)
+    tag(1002, 6, 1); str($4)
+    if ($2 != "") { tag(1003, 4, 1); dint($2) }
+    tag(1004, 9, 1); str($6)
+    tag(1000001, 4, 1); dint($5)
+    if ($7 != "") { n = split($7, a, ","); tag(1047, 8, n); for (i = 1; i <= n; i++) str(a[i]) }
+    if ($8 != "") { n = split($8, a, ","); tag(1049, 8, n); for (i = 1; i <= n; i++) str(a[i]) }
+    if ($9 != "") {
+        n = split($9, a, ","); nd = 0; split("", dirs)
+        for (i = 1; i <= n; i++) { d = a[i]; sub(/[^\/]*$/, "", d); b[i] = substr(a[i], length(d) + 1); if (!(d in dirs)) { dirs[d] = nd++; dn[nd - 1] = d }; di[i] = dirs[d] }
+        tag(1116, 4, n); for (i = 1; i <= n; i++) dint(di[i])
+        tag(1117, 8, n); for (i = 1; i <= n; i++) str(b[i])
+        tag(1118, 8, nd); for (i = 0; i < nd; i++) str(dn[i])
+    }
+    put(142); put(173); put(232); put(1); u32(0); u32(nt); u32(dlen)
+    for (i = 1; i <= nt; i++) { u32(tags[i]); u32(types[i]); u32(offs[i]); u32(cnts[i]) }
+    printf("%s%s\n", out, dat)
+}' | while IFS= read -r header; do printf "${header}"; done

@@ -1,0 +1,421 @@
+#description: cmdfound library - the rules a program in a container runs by
+#usage: . confined-launch, from the launchers of docker and udocker, which run
+#       where cmdfound's api is not, and from those channels when they build
+#a launcher already written sources the copy each obtain refreshes: renaming
+#a function here breaks the launchers on disk
+
+#where a build finds the user's CA file, copied in and removed before the commit
+CONFINED_CA="/etc/cmdfound/ca.pem"
+
+#ALNUM's alphabet and _, written out: a letter some locale counts in [A-Za-z]
+#is no name to the shell, and eval of it would end the launcher
+_launch_alpha="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_"
+_launch_alnum="${_launch_alpha}0123456789"
+_launch_quote="'"
+_launch_nl="
+"
+
+_launch_say() {
+    printf "%s\\n" "cmdfound: ${*}" >&2
+}
+
+_launch_word() {
+    #$1... => words, appended to _launch_out quoted for eval set --
+    #    _launch_word -v "/home/user/a dir"  =>  -v '/home/user/a dir'
+    #    _launch_word "it's"                 =>  'it'\''s'
+    #    _launch_word ""                     =>  ''
+    for _lw__w in "${@}"; do
+        case "${_lw__w}" in
+            ''|*[!${_launch_alnum}./:=@%+,-]*) ;;
+            *) _launch_out="${_launch_out}${_lw__w} "; continue ;;
+        esac
+        _lw__q=""
+        while :; do
+            case "${_lw__w}" in
+                *"${_launch_quote}"*)
+                    _lw__q="${_lw__q}${_lw__w%%"${_launch_quote}"*}'\\''"
+                    _lw__w="${_lw__w#*"${_launch_quote}"}" ;;
+                *) break ;;
+            esac
+        done
+        _launch_out="${_launch_out}'${_lw__q}${_lw__w}' "
+    done
+}
+
+_launch_under() {
+    #$1 => an absolute path, $2 => dirs to leave the sockets out; 0 when it is mounted
+    #    _launch_under /home/user/x             =>  0, HOME being /home/user
+    #    _launch_under /run/user/1000/bus       =>  0, a mounted socket
+    #    _launch_under /run/user/1000/bus dirs  =>  1
+    for _lu__m in "${_launch_home}" "${_launch_cwd}"; do
+        [ -n "${_lu__m}" ] || continue
+        case "${1}" in
+            "${_lu__m}"|"${_lu__m}"/*) return 0 ;;
+        esac
+    done
+    [ -z "${2}" ] && [ -n "${_launch_sockets}" ] && [ -S "${1}" ] && \
+        _launch_socket_mounted "${1}"
+}
+
+_launch_socket_mounted() {
+    _lsm__path="${1}"
+    eval "set -- ${_launch_sockets}"
+    for _lsm__m in "${@}"; do
+        [ X"${_lsm__m}" = X"${_lsm__path}" ] && return 0
+    done
+    return 1
+}
+
+_launch_within() {
+    #$1 => a path, $2 => a directory
+    #    _launch_within /tmp/x /tmp   =>  0
+    #    _launch_within /tmpfoo /tmp  =>  1
+    #    _launch_within /x /          =>  1
+    case "${2}" in
+        ''|/) return 1 ;;
+    esac
+    case "${1}" in
+        "${2}"|"${2}"/*) return 0 ;;
+    esac
+    return 1
+}
+
+_launch_reach() {
+    #$1 => the physical cwd, $2 => HOME or /tmp; its path under $2 in _launch_workdir
+    #    _launch_reach /data/user/proj /home/user  =>  0, /home/user/proj  (/home/user -> /data/user)
+    #    _launch_reach /etc /home/user             =>  1
+    [ -n "${2}" ] || return 1
+    if _launch_within "${1}" "${2}"; then
+        _launch_workdir="${1}"
+        return 0
+    fi
+    _lrc__physical=""
+    cd -P "${2}" 2>/dev/null && _lrc__physical="${PWD}"
+    cd -P "${1}" 2>/dev/null || return 1
+    _launch_within "${1}" "${_lrc__physical}" || return 1
+    _launch_workdir="${2}${1#"${_lrc__physical}"}"
+}
+
+_launch_volumes() {
+    #$1 => pair for docker, nothing for udocker
+    #    _launch_volumes pair  =>  -v /home/user:/home/user
+    #    _launch_volumes       =>  -v /home/user
+    _lv__pair="${1}"
+    eval "set -- ${_launch_sockets}"
+    for _lv__m in "${_launch_home}" "${_launch_cwd}" "${@}"; do
+        [ -n "${_lv__m}" ] || continue
+        if [ -n "${_lv__pair}" ]; then
+            _launch_word -v "${_lv__m}:${_lv__m}"
+        else
+            _launch_word -v "${_lv__m}"
+        fi
+    done
+}
+
+_launch_reachable() {
+    #$1 => a value; 1 when it is a path, or a : list of them, not all mounted
+    #    _launch_reachable /home/user/bin:/usr/bin  =>  1
+    #    _launch_reachable /home/user/bin           =>  0, HOME being /home/user
+    #    _launch_reachable :0                       =>  0, a DISPLAY and no path
+    case "${1}" in
+        /*|:*) ;;
+        *) return 0 ;;
+    esac
+    _lr__rest="${1}:"; _lr__outside=""
+    while [ -n "${_lr__rest}" ]; do
+        _lr__element="${_lr__rest%%:*}"; _lr__rest="${_lr__rest#*:}"
+        case "${_lr__element}" in
+            '') ;;
+            /*) _launch_under "${_lr__element}" || _lr__outside="1" ;;
+            *)  return 0 ;;
+        esac
+    done
+    [ -z "${_lr__outside}" ]
+}
+
+_launch_ids() {
+    #$1 => a file laid out as /proc/self/status, the ids in _launch_uid, _gid, _groups
+    #    _launch_ids /proc/self/status  =>  1000, 1000, 4 24 27
+    _li__file="${1}"
+    _launch_uid=""; _launch_gid=""; _li__groups=""
+    if [ -r "${_li__file}" ]; then
+        while IFS=" 	" read -r _li__key _li__real _li__effective _li__rest; do
+            case "${_li__key}" in
+                Uid:) _launch_uid="${_li__effective}" ;;
+                Gid:) _launch_gid="${_li__effective}" ;;
+                Groups:) _li__groups="${_li__real} ${_li__effective} ${_li__rest}"; break ;;
+            esac
+        done < "${_li__file}"
+    fi
+    case "${_launch_uid}:${_launch_gid}" in
+        :*|*:|*[!0-9:]*)
+            _launch_uid="$(id -u)" && _launch_gid="$(id -g)" && \
+                _li__groups="$(id -G)" || return 1
+            case "${_launch_uid}:${_launch_gid}" in
+                :*|*:|*[!0-9:]*) return 1 ;;
+            esac ;;
+    esac
+    _launch_groups=""; _li__rest="${_li__groups} "
+    while [ -n "${_li__rest}" ]; do
+        _li__g="${_li__rest%% *}"; _li__rest="${_li__rest#* }"
+        case "${_li__g}" in
+            ''|*[!0-9]*|"${_launch_gid}") continue ;;
+        esac
+        case " ${_launch_groups} " in
+            *" ${_li__g} "*) continue ;;
+        esac
+        _launch_groups="${_launch_groups}${_launch_groups:+ }${_li__g}"
+    done
+    return 0
+}
+
+_launch_sets() {
+    #$1 => a file laid out as /proc/self/status, that one when not given
+    #sets the _launch_ variables, 1 when the ids cannot be read
+    _ls__file="${1}"
+    _launch_ids "${_ls__file:-/proc/self/status}" || return 1
+
+    _launch_tty=""
+    [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && _launch_tty="1"
+
+    _launch_home=""; _launch_cwd=""; _launch_sockets=""; _launch_workdir=""
+
+    #trailing slashes off; / ends as '', no home to mount
+    _ls__home="${HOME}"
+    while :; do
+        case "${_ls__home}" in
+            */) _ls__home="${_ls__home%/}" ;;
+            *) break ;;
+        esac
+    done
+    case "${_ls__home}" in
+        /*) [ -d "${_ls__home}" ] && _launch_home="${_ls__home}" ;;
+    esac
+
+    #cd -P . and not $(pwd), a fork on every run. In a deleted directory dash's
+    #cd fails and bash's succeeds, leaving PWD as the old path with /. on it,
+    #or as . in a bash that started there: only a PWD that is a path from / and
+    #still a directory is one
+    _ls__cwd=""
+    if cd -P . 2>/dev/null; then
+        case "${PWD}" in
+            /*) [ -d "${PWD}" ] && _ls__cwd="${PWD}" ;;
+        esac
+    fi
+    if [ -z "${_ls__cwd}" ]; then
+        _launch_workdir="/"
+        _launch_say "the working directory was deleted, so it is not mounted; the program runs in /"
+    elif _launch_reach "${_ls__cwd}" "${_launch_home}"; then
+        :
+    elif _launch_reach "${_ls__cwd}" /tmp; then
+        _launch_under "${_launch_workdir}" dirs || _launch_cwd="${_launch_workdir}"
+    else
+        _launch_workdir="/"
+        _launch_say "${_ls__cwd} is outside your home and /tmp, so it is not mounted; the program runs in /"
+    fi
+
+    #a value's newline can fake an "export X=" line: only a set name is kept
+    _launch_names=""
+    _ls__env="$(export -p)"
+    _ls__ifs="${IFS}"; _ls__ifs_set="${IFS+x}"
+    case "$-" in
+        *f*) _ls__glob="" ;;
+          *) _ls__glob="1"; set -f ;;
+    esac
+    IFS="
+"
+    for _ls__line in ${_ls__env}; do
+        case "${_ls__line}" in
+            "export "*)     _ls__name="${_ls__line#export }" ;;
+            "declare -x "*) _ls__name="${_ls__line#declare -x }" ;;
+            *) continue ;;
+        esac
+        _ls__name="${_ls__name%%=*}"
+        case "${_ls__name}" in
+            ''|[!${_launch_alpha}]*|*[!${_launch_alnum}]*) continue ;;
+            PATH|LD_*|SHELL|PWD|OLDPWD|SHLVL|_|HOSTNAME|MAIL|TERMINFO|TERMINFO_DIRS|\
+            MANPATH|INFOPATH|XDG_DATA_DIRS|XDG_CONFIG_DIRS|XDG_RUNTIME_DIR|\
+            PKG_CONFIG_PATH|LIBRARY_PATH|CPATH|C_INCLUDE_PATH|CPLUS_INCLUDE_PATH|\
+            LOCPATH|GCONV_PATH|NLSPATH|PYTHONPATH|PYTHONHOME|PYTHONUSERBASE|\
+            VIRTUAL_ENV|CONDA_*|MAMBA_*|PERL5LIB|PERLLIB|PERL_LOCAL_LIB_ROOT|\
+            RUBYLIB|RUBYOPT|GEM_HOME|GEM_PATH|NODE_PATH|LUA_PATH|LUA_CPATH|\
+            CLASSPATH|JAVA_HOME|GOROOT|GIO_MODULE_DIR|GTK_PATH|QT_PLUGIN_PATH|\
+            SSL_CERT_FILE|SSL_CERT_DIR|CURL_CA_BUNDLE|REQUESTS_CA_BUNDLE|\
+            NODE_EXTRA_CA_CERTS) continue ;;
+        esac
+        case " ${_launch_names} " in
+            *" ${_ls__name} "*) continue ;;
+        esac
+        eval "_ls__set=\"\${${_ls__name}+x}\" _ls__value=\"\${${_ls__name}}\""
+        [ -n "${_ls__set}" ] || continue
+        case "${_ls__value}" in
+            /*:*|:*) _launch_reachable "${_ls__value}" || continue ;;
+            /*) if ! _launch_under "${_ls__value}" dirs; then
+                    [ -S "${_ls__value}" ] || continue
+                    if ! _launch_socket_mounted "${_ls__value}"; then
+                        _launch_out="${_launch_sockets}"; _launch_word "${_ls__value}"
+                        _launch_sockets="${_launch_out}"
+                    fi
+                fi ;;
+        esac
+        _launch_names="${_launch_names}${_launch_names:+ }${_ls__name}"
+    done
+    if [ -n "${_ls__ifs_set}" ]; then IFS="${_ls__ifs}"; else unset IFS; fi
+    [ -n "${_ls__glob}" ] && set +f
+    return 0
+}
+
+_launch_env() {
+    #$1... => the variables passed by value; every other one goes by name
+    #    _launch_env TERM  =>  -e TERM=xterm -e HOME -e LANG
+    _le__names=" ${_launch_names} "
+    for _le__name in "${@}"; do
+        case "${_le__name}" in
+            ''|*[!${_launch_alnum}]*) continue ;;
+        esac
+        case "${_le__names}" in
+            *" ${_le__name} "*)
+                _le__names="${_le__names%%" ${_le__name} "*} ${_le__names#*" ${_le__name} "}"
+                eval "_le__value=\"\${${_le__name}}\""
+                _launch_word -e "${_le__name}=${_le__value}" ;;
+        esac
+    done
+    _le__rest="${_le__names# }"
+    while [ -n "${_le__rest}" ]; do
+        _le__name="${_le__rest%% *}"; _le__rest="${_le__rest#* }"
+        [ -n "${_le__name}" ] && _launch_out="${_launch_out}-e ${_le__name} "
+    done
+}
+
+_launch_docker() {
+    #$1... => the variables passed by value
+    #    _launch_docker  =>  -t -u 1000:1000 --group-add 27 ... -w /home/user/proj -e HOME ...
+    _launch_out=""
+    [ -n "${_launch_tty}" ] && _launch_word -t
+    _launch_word -u "${_launch_uid}:${_launch_gid}"
+    _ld__rest="${_launch_groups} "
+    while [ -n "${_ld__rest}" ]; do
+        _ld__g="${_ld__rest%% *}"; _ld__rest="${_ld__rest#* }"
+        [ -n "${_ld__g}" ] && _launch_word --group-add "${_ld__g}"
+    done
+    _launch_word -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
+    _launch_volumes pair
+    _launch_word -w "${_launch_workdir}"
+    _launch_env "${@}"
+    printf "%s\\n" "${_launch_out}"
+}
+
+_launch_udocker() {
+    #$1... => the variables passed by value
+    #    _launch_udocker  =>  --hostauth --user=1000 -v /home/user -w /home/user/proj -e HOME ...
+
+    #no supplementary groups: proot checks files against the process's own
+    _launch_out=""
+    _launch_word --hostauth "--user=${_launch_uid}"
+    _launch_volumes
+    _launch_word -w "${_launch_workdir}"
+    _launch_env "${@}"
+    printf "%s\\n" "${_launch_out}"
+}
+
+_launch_next_flag() {
+    #the next word of _launch_flags into _launch_flag, split as the shell does
+    #    _launch_flags="-v 'a b'"  =>  -v, then a b, then 1
+    #    _launch_flags="-v 'a"     =>  -v, then 1 with ' in _launch_open
+    _lnf__in=""; _launch_flag=""; _launch_open=""
+    while [ -n "${_launch_flags}" ]; do
+        _lnf__next="${_launch_flags#?}"; _lnf__c="${_launch_flags%"${_lnf__next}"}"; _launch_flags="${_lnf__next}"
+        case "${_launch_open}" in
+            "'")
+                case "${_lnf__c}" in
+                    "'") _launch_open="" ;;
+                    *) _launch_flag="${_launch_flag}${_lnf__c}" ;;
+                esac
+                continue ;;
+            '"')
+                case "${_lnf__c}" in
+                    '"') _launch_open="" ;;
+                    '\')
+                        _lnf__next="${_launch_flags#?}"; _lnf__e="${_launch_flags%"${_lnf__next}"}"
+                        case "${_lnf__e}" in
+                            '$'|'`'|'"'|'\') _launch_flag="${_launch_flag}${_lnf__e}"; _launch_flags="${_lnf__next}" ;;
+                            "${_launch_nl}") _launch_flags="${_lnf__next}" ;;
+                            *) _launch_flag="${_launch_flag}${_lnf__c}" ;;
+                        esac ;;
+                    *) _launch_flag="${_launch_flag}${_lnf__c}" ;;
+                esac
+                continue ;;
+        esac
+        case "${_lnf__c}" in
+            ' '|'	'|"${_launch_nl}")
+                [ -z "${_lnf__in}" ] || return 0 ;;
+            "'"|'"') _launch_open="${_lnf__c}"; _lnf__in="1" ;;
+            '\')
+                _lnf__next="${_launch_flags#?}"; _lnf__e="${_launch_flags%"${_lnf__next}"}"; _launch_flags="${_lnf__next}"
+                case "${_lnf__e}" in
+                    "${_launch_nl}") ;;
+                    '') _launch_flag="${_launch_flag}${_lnf__c}"; _lnf__in="1" ;;
+                    *) _launch_flag="${_launch_flag}${_lnf__e}"; _lnf__in="1" ;;
+                esac ;;
+            *) _launch_flag="${_launch_flag}${_lnf__c}"; _lnf__in="1" ;;
+        esac
+    done
+    [ -z "${_launch_open}" ] && [ -n "${_lnf__in}" ]
+}
+
+_launch_flags_read() {
+    #$1 => the user's flags, counted into _launch_flags_left
+    #    _launch_flags_read "-v 'a b'"  =>  2
+    _launch_flags_value="${1}"; _launch_flags_left="0"; _launch_flags="${1}"
+    while _launch_next_flag; do
+        _launch_flags_left="$((_launch_flags_left + 1))"
+    done
+}
+
+_launch_prev_flag() {
+    #the last word of the user's flags not taken yet into _launch_flag
+    #    "-v 'a b'"  =>  a b, then -v, then 1
+
+    #last first, so a launcher prepends them in order without a quadratic copy
+    [ "${_launch_flags_left}" -gt "0" ] || return 1
+    _launch_flags="${_launch_flags_value}"; _lpf__n="${_launch_flags_left}"
+    while [ "${_lpf__n}" -gt "0" ]; do
+        _launch_next_flag
+        _lpf__n="$((_lpf__n - 1))"
+    done
+    _launch_flags_left="$((_launch_flags_left - 1))"
+    return 0
+}
+
+_launch_flags_closed() {
+    #$1 => docker or udocker; 1, said, when the user's flags leave a quote open
+    [ -n "${_launch_open}" ] || return 0
+    case "${1}" in
+        docker)  _lfc__var="CMDFOUND_DOCKER_FLAGS" ;;
+        udocker) _lfc__var="CMDFOUND_UDOCKER_FLAGS" ;;
+    esac
+    _launch_say "${_lfc__var} leaves a ${_launch_open} open; ${1} was not run"
+    return 1
+}
+
+_build_network() {
+    #prints the CA file to copy in, or '', then -e for each proxy and SSL_CERT_FILE
+    #    a CA file, https_proxy  =>  /etc/ssl/ca.pem -e https_proxy -e SSL_CERT_FILE=/etc/cmdfound/ca.pem
+    #    neither                 =>  ''
+    _bn__ca=""; _launch_out=""
+    for _bn__v in SSL_CERT_FILE CURL_CA_BUNDLE; do
+        eval "_bn__file=\"\${${_bn__v}}\""
+        if [ -n "${_bn__file}" ] && [ -f "${_bn__file}" ] && [ -r "${_bn__file}" ]; then
+            _bn__ca="${_bn__file}"
+            break
+        fi
+    done
+    _launch_word "${_bn__ca}"
+    for _bn__v in http_proxy https_proxy no_proxy all_proxy \
+                  HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY; do
+        eval "_bn__set=\"\${${_bn__v}+x}\""
+        [ -n "${_bn__set}" ] && _launch_word -e "${_bn__v}"
+    done
+    [ -n "${_bn__ca}" ] && _launch_word -e "SSL_CERT_FILE=${CONFINED_CA}"
+    printf "%s\\n" "${_launch_out}"
+}

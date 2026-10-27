@@ -1,0 +1,487 @@
+#description: cmdfound library - runs the distros' channels, each a row of distro.d/<format>.d/, and has what they do alike
+#usage: loaded by cmdfound for a channel that is a row, CMDFOUND_CHANNEL_FILE
+#       naming the row; it answers as the row's usage says. A format sets
+#       FORMAT and INSTALLER, NEEDS unless its rows do, and defines
+#       _index_bytes, _fetch, _rows and _install_line
+
+#cmd   COMMAND  PACKAGE
+#pkg   PACKAGE  VERSION  NATIVE-VERSION  SIZE  BYTES  REPO  DESCRIPTION
+#VERSION is NATIVE-VERSION as cmdfound writes versions: no epoch, _ for ~ and
+#+ for ^. BYTES is what installing it downloads into the image, it and what it
+#pulls in; - for a package with no command, which is no answer
+SELF="${CMDFOUND_CHANNEL_FILE}"
+SELF_NAME="${SELF##*/}"
+#all the channel has is under it, so one rm -rf removes the channel whole
+CH="${CMDFOUND_HOME:-/tmp}/channels/${SELF_NAME}"
+INDEX="${CH}/index/${SELF_NAME}.tsv"
+#the row, then its format: the file its directory is named after, rpm.d/fedora
+#being read by rpm. NEEDS emptied first: a row that sets none needs nothing
+#the environment says
+NEEDS=""
+. "${SELF}" || exit 1
+ROWS="$(_realdir "${SELF}")"
+. "${ROWS%.d}" || exit 1
+
+_platform() {
+    #sets arch as FORMAT names this cpu, goarch and govariant as an image index does
+    #    x86_64, apt  =>  amd64, amd64, ''
+    #    armv7l, apk  =>  armv7, arm, v7
+    _util_machine_in
+    case "${_util_machine_in__cpu}" in
+        x86_64|amd64)            apkarch="x86_64";  debarch="amd64";   rpmarch="x86_64";  goarch="amd64";   govariant="" ;;
+        aarch64|arm64)           apkarch="aarch64"; debarch="arm64";   rpmarch="aarch64"; goarch="arm64";   govariant="" ;;
+        armv7l|armv7)            apkarch="armv7";   debarch="armhf";   rpmarch="armv7hl"; goarch="arm";     govariant="v7" ;;
+        i386|i486|i586|i686|x86) apkarch="x86";     debarch="i386";    rpmarch="i686";    goarch="386";     govariant="" ;;
+        ppc64le)                 apkarch="ppc64le"; debarch="ppc64el"; rpmarch="ppc64le"; goarch="ppc64le"; govariant="" ;;
+        s390x)                   apkarch="s390x";   debarch="s390x";   rpmarch="s390x";   goarch="s390x";   govariant="" ;;
+        riscv64)                 apkarch="riscv64"; debarch="riscv64"; rpmarch="riscv64"; goarch="riscv64"; govariant="" ;;
+        *) return 1 ;;
+    esac
+    case "${FORMAT}" in
+        apk|pacman) arch="${apkarch}" ;;
+        #ALT calls i686 i586
+        aptrpm) arch="${rpmarch}"; [ X"${arch}" = X"i686" ] && arch="i586" ;;
+        apt) arch="${debarch}" ;;
+        rpm) arch="${rpmarch}" ;;
+    esac
+    _util_has_word "${ARCHES}" "${arch}"
+}
+
+_digest_in() {
+    #$1 => a sum's type, as a catalog names it, $2 => a file
+    #    _digest_in sha512 primary.xml.zst  =>  0, __out 76b5cfdd…
+    #    _digest_in md5 primary.xml.zst     =>  1
+    _digest_in__out=""
+    case "${1}" in
+        sha256) _digest_in__out="$(_util_checksum "${2}")" ;;
+        sha512) if command -v "sha512sum" >/dev/null 2>&1; then
+                    _digest_in__out="$(sha512sum "${2}" | awk '{print $1; exit}')"
+                elif command -v "shasum" >/dev/null 2>&1; then
+                    _digest_in__out="$(shasum -a 512 "${2}" | awk '{print $1; exit}')"
+                elif command -v "openssl" >/dev/null 2>&1; then
+                    _digest_in__out="$(openssl dgst -sha512 "${2}" | awk '{print $NF; exit}')"
+                fi ;;
+        blake2b) if command -v "b2sum" >/dev/null 2>&1; then
+                    _digest_in__out="$(b2sum "${2}" | awk '{print $1; exit}')"
+                elif command -v "openssl" >/dev/null 2>&1; then
+                    _digest_in__out="$(openssl dgst -blake2b512 "${2}" | awk '{print $NF; exit}')"
+                fi ;;
+    esac
+    [ -n "${_digest_in__out}" ]
+}
+
+_sum_in() {
+    #$1 => a Release, InRelease or ALT release file, $2 => a path it lists. The
+    #sum it gives that path, the strongest it has, as "type hex" in __out
+    #    _sum_in resolute.InRelease main/cnf/Commands-amd64.xz  =>  0, __out sha256 0ca417...
+    #    _sum_in p11.release base/pkglist.classic.xz          =>  0, __out blake2b d6784e...
+    _sum_in__out="$(awk -v want="${2}" '
+        /^[^ ]/ { kind = ($0 == "SHA256:") ? "sha256" : ($0 == "SHA512:") ? "sha512" : ($0 == "BLAKE2b:") ? "blake2b" : ""; next }
+        kind != "" && $3 == want { sum[kind] = $1 }
+        END { if ("sha256" in sum) print "sha256 " sum["sha256"]; else if ("sha512" in sum) print "sha512 " sum["sha512"]
+              else if ("blake2b" in sum) print "blake2b " sum["blake2b"] }' "${1}" 2>/dev/null)"
+    case "${_sum_in__out#* }" in
+        ''|*[!0-9a-f]*) _sum_in__out=""; return 1 ;;
+    esac
+}
+
+_heads_bytes() {
+    #a url a line on stdin. What fetching them all would transfer, or nothing
+    #when one of them cannot say: a half answer is no answer. The HEADs go
+    #out together: a suite is a score of files, and one after another on a
+    #slow mirror they took a minute, with nothing written anywhere meanwhile
+    _hb__n="0"
+    {
+        while read -r _hb__url; do
+            _api_fetcher_head_size "${_hb__url}" &
+            _hb__n=$((_hb__n + 1))
+        done
+        wait
+        printf "n=%s\\n" "${_hb__n}"
+    } | awk -F= '$1 == "n" { n = $2; next } { t += $1; m++ } END { if (n > 0 && m == n) print t }'
+}
+
+_catalog_file() {
+    #$1 => a url, $2 => the file it is kept in, $3 => what it is, as a message
+    #names it, $4 => the sum another file lists for it, "type hex", and $5 =>
+    #that file. One kept with that sum is not fetched again; without a sum it
+    #always is. What was downloaded is added to bytes
+    #    _catalog_file "${url}" "${CH}/index/main.APKINDEX-x86_64.tar.gz" "Alpine 3.22's main catalog"
+    #    _catalog_file "${url}" "${kept}" "Fedora's updates primary.xml" "sha256 51d5…" "its repomd.xml"
+    _cf__url="${1}"; _cf__kept="${2}"; _cf__what="${3}"; _cf__sum="${4}"; _cf__by="${5}"
+    if [ -n "${_cf__sum}" ] && _digest_in "${_cf__sum%% *}" "${_cf__kept}" 2>/dev/null && \
+        [ X"${_digest_in__out}" = X"${_cf__sum#* }" ]; then
+        return 0
+    fi
+    _api_fetcher_resumable "${_cf__url}" "${_cf__kept}.part"
+    case "${?}" in
+        0) ;;
+        1) _api_answer_unreachable "${_cf__what} is not at ${MIRROR}" ;;
+        *) _api_answer_unreachable "${_cf__what} ${CATALOG_STOPPED}" ;;
+    esac
+    if [ -n "${_cf__sum}" ] && ! { _digest_in "${_cf__sum%% *}" "${_cf__kept}.part.$$" && \
+        [ X"${_digest_in__out}" = X"${_cf__sum#* }" ]; }; then
+        rm -f "${_cf__kept}.part.$$"
+        _api_answer_unreachable "${_cf__what} is not the one ${_cf__by} names, the old catalog is kept"
+    fi
+    bytes="$((bytes + $(wc -c < "${_cf__kept}.part.$$")))"
+    mv "${_cf__kept}.part.$$" "${_cf__kept}" || { rm -f "${_cf__kept}.part.$$"; exit 1; }
+}
+
+_unpacked() {
+    #$1 => a catalog as it was fetched. What it holds, on stdout, told apart by
+    #its first bytes: a pacman database is named for no compression
+    #    main.APKINDEX-x86_64.tar.gz (1f 8b)  =>  the tar inside it
+    #    chaotic-aur.files (28 b5 2f fd)      =>  the tar inside it
+    #GZIP, XZ_OPT and XZ_DEFAULTS emptied: each would change what comes out
+    case "$(od -An -N4 -tx1 "${1}" 2>/dev/null | tr -d ' \n')" in
+        1f8b*)    GZIP= gzip -dc "${1}" ;;
+        fd377a58) XZ_OPT= XZ_DEFAULTS= xz -dc "${1}" ;;
+        28b52ffd) zstd -dcq "${1}" ;;
+        *) return 1 ;;
+    esac
+}
+
+_priced() {
+    #the rows a format reads off its catalog, on stdin, and then "end":
+    #    cmd   COMMAND  PACKAGE
+    #    pkg   PACKAGE  NATIVE-VERSION  SIZE  REPO  DESCRIPTION
+    #    prov  TOKEN    PACKAGE   a name, library or path it provides
+    #    dep   PACKAGE  TOKEN     what it needs, versions dropped; a|b is either
+    #    inst  PACKAGE  TOKEN     apk's install_if, a !name kept
+    #written out as the index, each package with a command priced:
+    #    pkg jq 1:1.8~rc1-2 900 main ...  =>  pkg jq 1.8_rc1-2 1:1.8~rc1-2 900 4100 main ...
+    #
+    #What a package pulls in is walked here, once for all of them, as the
+    #installer would: a probe that walked it would read every dependency of the
+    #distro each time
+    pr_base="${BASE}" LC_ALL=C awk -F'\t' '
+    #a token is there when the image or this walk has the package of that
+    #name, or one that provides it
+    function there(t,   i, k) {
+        if ((t in have) || walked[t] == walk) return 1
+        k = np[t]
+        for (i = 1; i <= k; i++) if ((prv[t, i] in have) || walked[prv[t, i]] == walk) return 1
+        return 0
+    }
+    #of a need'\''s alternatives, a|b: nothing when one of them is there
+    #already, else the first that is a package, else the first provider of one
+    function pick(need,   n, k, alt) {
+        n = split(need, alt, "|")
+        for (k = 1; k <= n; k++) if (there(alt[k])) return ""
+        for (k = 1; k <= n; k++) if (alt[k] in ver) return alt[k]
+        for (k = 1; k <= n; k++) if (np[alt[k]] > 0) return prv[alt[k], 1]
+        return ""
+    }
+    #an install_if is met when every name it lists is there, and every name it
+    #negates is not
+    function met(c,   i, t) {
+        for (i = 1; i <= ni[c]; i++) {
+            t = ip[c, i]
+            if (substr(t, 1, 1) == "!") { if (there(substr(t, 2))) return 0 }
+            else if (!there(t)) return 0
+        }
+        return 1
+    }
+    #from queue[head] on, all that comes along; with base set it is had, else
+    #what the image lacks is summed
+    function walk_from(head, base,   q, i, n, d, j, c, total, more, nlook, from, look) {
+        total = 0
+        do {
+            while (head <= tail) {
+                q = queue[head++]
+                if (base) have[q] = 1
+                else total += size[q]
+                n = edged ? ne[q] : nd[q]
+                for (i = 1; i <= n; i++) {
+                    if (!edged) d = pick(dp[q, i])
+                    else if ((q, i) in eg) d = pick(eg[q, i])
+                    else d = es[q, i]
+                    if (d == "" || walked[d] == walk || (d in have)) continue
+                    walked[d] = walk; queue[++tail] = d
+                }
+            }
+            #what came since the last look counts towards each install_if
+            #naming it, and one is looked at once all it names is there
+            more = 0; nlook = 0; from = looked + 1; looked = tail
+            for (j = from; j <= looked; j++) {
+                q = queue[j]
+                for (i = 1; i <= non[q]; i++) {
+                    c = onc[q, i]
+                    if (got[c, oni[q, i]] == walk) continue
+                    got[c, oni[q, i]] = walk
+                    if (count[c] != walk) { count[c] = walk; hits[c] = 0 }
+                    if (++hits[c] == need[c]) look[++nlook] = c
+                }
+            }
+            for (j = 1; j <= nlook; j++) {
+                c = look[j]
+                if (walked[c] == walk || (c in have) || !met(c)) continue
+                walked[c] = walk; queue[++tail] = c; more = 1
+            }
+        } while (more)
+        return total
+    }
+    function closure(p) {
+        if (p in have) return 0
+        walk++; tail = 0; looked = 0
+        walked[p] = walk; queue[++tail] = p
+        return walk_from(1, 0)
+    }
+    #a root is a name like any dependency: libc-utils is one musl-utils
+    #provides. All of them are had before any is walked, so that /bin/sh is
+    #busybox-binsh and not whatever is listed first
+    function had(   n, i, r, roots) {
+        walk++; tail = 0; looked = 0
+        n = split(ENVIRON["pr_base"], roots, " ")
+        for (i = 1; i <= n; i++) {
+            r = roots[i]
+            if (!(r in ver) && np[r] > 0) r = prv[r, 1]
+            if ((r in ver) && walked[r] != walk) { have[r] = 1; walked[r] = walk; queue[++tail] = r }
+        }
+        walk_from(1, 1)
+    }
+    #a need as the walk weighs it: nothing when the image meets it, the one
+    #package that can, or |need when more than one can
+    function resolve(need,   n, k, j, t, alt, cand, nc, c) {
+        if (pick(need) == "") return ""
+        n = split(need, alt, "|"); nc = 0
+        for (k = 1; k <= n; k++) {
+            t = alt[k]
+            if ((t in ver) && !((t) in cand)) { cand[t] = 1; nc++; c = t }
+            for (j = 1; j <= np[t]; j++) if (!((prv[t, j]) in cand)) { cand[prv[t, j]] = 1; nc++; c = prv[t, j] }
+        }
+        if (nc == 0) return ""
+        return (nc == 1) ? c : "|" need
+    }
+    #each need, once the image is had: one it meets is dropped, one only a
+    #single package can meet is that package, and only one with a choice
+    #left is weighed while walking, in the order the needs were written. How
+    #a need resolves does not depend on who needs it, and is worked out once
+    function edges(   q, i, r, seen) {
+        for (q in nd) {
+            split("", seen)
+            for (i = 1; i <= nd[q]; i++) {
+                if (!((dp[q, i]) in resolved)) resolved[dp[q, i]] = resolve(dp[q, i])
+                r = resolved[dp[q, i]]
+                if (r == "" || (r in seen)) continue
+                seen[r] = 1
+                ne[q]++
+                if (substr(r, 1, 1) == "|") eg[q, ne[q]] = substr(r, 2)
+                else es[q, ne[q]] = r
+            }
+        }
+        edged = 1
+    }
+    #which install_if a package coming along counts towards: the ones that
+    #name it, or a name it provides, for each name the image does not have.
+    #One that names what no walk can bring, as most name docs, lang or pyc,
+    #is never met and is left out
+    function reachable(   q, i, j, k, c, t, n, alt, ok) {
+        for (q in hascmd) can[q] = 1
+        for (j = 1; j <= nconds; j++) can[conds[j]] = 1
+        for (q in ne) {
+            for (i = 1; i <= ne[q]; i++) {
+                if (!((q, i) in eg)) { can[es[q, i]] = 1; continue }
+                n = split(eg[q, i], alt, "|")
+                for (k = 1; k <= n; k++) {
+                    if (alt[k] in ver) can[alt[k]] = 1
+                    for (j = 1; j <= np[alt[k]]; j++) can[prv[alt[k], j]] = 1
+                }
+            }
+        }
+        for (j = 1; j <= nconds; j++) {
+            c = conds[j]; ok = 1
+            for (i = 1; i <= ni[c] && ok; i++) {
+                t = ip[c, i]
+                if (substr(t, 1, 1) == "!" || (t in have) || (t in can)) continue
+                ok = 0
+                for (k = 1; k <= np[t]; k++) if ((prv[t, k] in have) || (prv[t, k] in can)) ok = 1
+            }
+            if (!ok) continue
+            for (i = 1; i <= ni[c]; i++) {
+                t = ip[c, i]
+                if (substr(t, 1, 1) == "!" || there(t)) continue
+                need[c]++
+                if (t in ver) { n = ++non[t]; onc[t, n] = c; oni[t, n] = i }
+                for (k = 1; k <= np[t]; k++) { q = prv[t, k]; n = ++non[q]; onc[q, n] = c; oni[q, n] = i }
+            }
+        }
+    }
+    $1 == "cmd"  { if (!seen[$2, $3]++) { cmds[++ncmd] = $2; cmdpkg[ncmd] = $3; hascmd[$3] = 1 }; next }
+    $1 == "pkg"  { if (!(($2) in ver)) order[++npkg] = $2; ver[$2] = $3; size[$2] = $4 + 0; repo[$2] = $5; about[$2] = $6; next }
+    $1 == "prov" { k = ++np[$2]; prv[$2, k] = $3; next }
+    $1 == "dep"  { k = ++nd[$2]; dp[$2, k] = $3; next }
+    $1 == "inst" { if (!(($2) in ni)) conds[++nconds] = $2; k = ++ni[$2]; ip[$2, k] = $3; next }
+    $1 == "end"  { ended = 1; exit }
+    END {
+        if (!ended) exit 1
+        had()
+        edges()
+        reachable()
+        for (i = 1; i <= ncmd; i++) if ((cmdpkg[i]) in ver) printf("cmd\t%s\t%s\n", cmds[i], cmdpkg[i])
+        for (i = 1; i <= npkg; i++) {
+            p = order[i]; v = ver[p]
+            sub(/^[0-9]+:/, "", v); gsub(/~/, "_", v); gsub(/\^/, "+", v)
+            b = ((p) in hascmd) ? sprintf("%.0f", closure(p)) : "-"
+            printf("pkg\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", p, v, ver[p], size[p], b, repo[p], about[p])
+        }
+    }'
+}
+
+_valid() {
+    #$1 => package, $2 => version, as cmdfound writes it: what a line run as root
+    #may carry
+    #    _valid figlet 2.2.5-r3   =>  0
+    #    _valid -figlet 2.2.5-r3  =>  1
+    case "${1}" in
+        ''|[!A-Za-z0-9_]*|*[!A-Za-z0-9._+-]*) return 1 ;;
+    esac
+    _api_is_version "${2}"
+}
+
+_meta() {
+    printf "%s\\n" "kind=catalog" "confines=yes" "describes=environment"
+    [ -n "${NEEDS}" ] && printf "needs=%s\\n" "${NEEDS}"
+    exit 0
+}
+
+_index() {
+    #$1 => "bytes" to weigh the catalog instead of fetching it
+    mode="${1}"
+    _platform || _api_answer_unreachable "${DISTRO_RELEASE} is not built for ${_util_machine_in__cpu}"
+    if [ X"${mode}" = X"bytes" ]; then
+        _ix__b="$(_index_bytes)"
+        _util_is_number "${_ix__b}" && printf "bytes=%s\\n" "${_ix__b}"
+        exit 0
+    fi
+    _util_mkdir_p "${CH}/index" || exit 1
+    new="${INDEX}.$$"; bytes="0"
+    _fetch
+    _api_catalog_arrived
+    #the end is said only once every row was read: _priced writes nothing without it
+    { _rows && printf "%s\\n" "end"; } 2>/dev/null | _priced > "${new}"
+    rm -f "${new}".*
+    rows="0"
+    [ -s "${new}" ] && rows="$(awk -F'\t' '$1 == "pkg" {n++} END {print n + 0}' "${new}" 2>/dev/null)"
+    _api_catalog_keep "${new}" "${INDEX}" "${rows}" "${DISTRO}'s catalog"
+    printf "packages=%s\\n" "$(awk -F'\t' '$1 == "pkg" {n++} END {print n + 0}' "${INDEX}")"
+    printf "names=%s\\n" "$(awk -F'\t' '$1 == "cmd" && !seen[$2]++ {n++} END {print n + 0}' "${INDEX}")"
+    printf "bytes=%s\\n" "${bytes}"
+    exit 0
+}
+
+_search() {
+    #$1... => the words to look for
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    search_words="${*}" LC_ALL=C awk -F'\t' -v ch="${SELF_NAME}" "${SEARCH_AWK}"'
+        #mawk makes c[$3] before it asks whether c has it, so the question
+        #is an if of its own and not part of the assignment
+        $1 == "cmd" { if (($3) in c) c[$3] = c[$3] "," $2; else c[$3] = $2; next }
+        $1 == "pkg" {
+            cmds = (($2) in c) ? c[$2] : "-"
+            if (!words_in($2 " " cmds " " $8)) next
+            if (!seen[$2]++) printf("%s:%s\t%s\t%s\n", ch, $2, cmds, $8)
+            next
+        }' "${INDEX}" | LC_ALL=C sort
+    exit 0
+}
+
+_probe() {
+    #$1 => a command or a package, $2 => a version when one was asked for
+    name="${1}"; ver="${2}"
+    [ -z "${name}" ] && exit 1
+    _platform || exit 1
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    #grep first: most names are not here, and grep says so ten times faster than awk
+    grep -F -q -e "cmd${TAB}${name}${TAB}" -e "pkg${TAB}${name}${TAB}" "${INDEX}" 2>/dev/null || exit 1
+    answer="$(ap_name="${name}" ap_ver="${ver}" LC_ALL=C awk -F'\t' '
+        #a command several packages have is a question, unless the spec named
+        #this channel and one package has the name: ubuntu:lzip is lzip, a bare
+        #lzip asks between lzip, plzip and xlunzip
+        function decide(   i) {
+            if (nc > 1 && !(named && ((name) in iscand))) { for (i = 1; i <= nc; i++) print "candidate=" cand[i]; rc = 3; return }
+            target = name
+            if (nc == 1 && !((name) in iscand)) target = cand[1]
+            #a package with no command is no answer: nothing of it runs
+            if (!(target in ver) || bytes[target] == "-") { rc = 1; return }
+            if (want != "" && want != ver[target]) { rc = 1; return }
+            rc = 0
+        }
+        BEGIN { name = ENVIRON["ap_name"]; want = ENVIRON["ap_ver"]; named = (ENVIRON["CMDFOUND_NAMED"] != "") }
+        $1 == "cmd" { if ($2 == name && !(($3) in iscand)) { iscand[$3] = 1; cand[++nc] = $3 }; next }
+        $1 == "pkg" { if ($2 == name || (($2) in iscand)) { ver[$2] = $3; bytes[$2] = $6 }; next }
+        END {
+            decide()
+            if (rc != 0) exit rc
+            printf("version=%s\n", ver[target])
+            printf("bytes=%s\n", bytes[target])
+            printf("package=%s\n", target)
+        }' "${INDEX}")"
+    case "${?}" in
+        0) ;;
+        3) printf "%s\\n" "${answer}" | LC_ALL=C sort; exit 3 ;;
+        *) exit 1 ;;
+    esac
+    package="$(printf "%s\\n" "${answer}" | awk -F= '$1 == "package" {print $2; exit}')"
+    version="$(printf "%s\\n" "${answer}" | awk -F= '$1 == "version" {print $2; exit}')"
+    _valid "${package}" "${version}" || exit 1
+    _api_image_in "${IMAGE}" "${REGISTRY}" "${REPOSITORY}" "${TAG}" "${goarch}" "${govariant}"
+    printf "version=%s\\n" "${version}"
+    printf "%s\\n" "${answer}" | awk -F= '$1 == "bytes"'
+    printf "estimate=%s\\n" "yes"
+    printf "package=%s\\n" "${package}"
+    printf "image=%s\\n" "${_api_image_in__out}"
+    [ -n "${_api_image_in__bytes}" ] && printf "image_bytes=%s\\n" "${_api_image_in__bytes}"
+    exit 0
+}
+
+_recipe() {
+    #$1 => a package, $2 => its version, $3 => the program asked for
+    name="${1}"; ver="${2}"; want="${3}"
+    if ! _valid "${name}" "${ver}"; then
+        case "${DISTRO}" in [AEIOUaeiou]*) a="an" ;; *) a="a" ;; esac
+        _api_answer_failed "'${name}' '${ver}' is not ${a} ${DISTRO} package and version this channel will install"
+    fi
+    if ! _util_is_url "${MIRROR}"; then
+        _api_answer_failed "the mirror '${MIRROR}' has characters this channel will not write into ${INSTALLER}'s command line"
+    fi
+    _platform || _api_answer_failed "${DISTRO_RELEASE} is not built for ${_util_machine_in__cpu}"
+    [ -s "${INDEX}" ] || _api_answer_no_index
+    found="$(ap_name="${name}" LC_ALL=C awk -F'\t' '
+        BEGIN { name = ENVIRON["ap_name"] }
+        $1 == "cmd" { if ($3 == name) print "cmd=" $2; next }
+        $1 == "pkg" { if ($2 == name) { print "version=" $3; print "native=" $4; exit }; next }' "${INDEX}")"
+    indexed="$(printf "%s\\n" "${found}" | awk -F= '$1 == "version" {print $2; exit}')"
+    if [ X"${indexed}" != X"${ver}" ]; then
+        _api_answer_failed "${SELF_NAME}'s catalog has no ${name} ${ver}$( [ -n "${indexed}" ] && printf ", it has %s" "${indexed}")"
+    fi
+    #what the installer is told is the version as the distro writes it
+    native="$(printf "%s\\n" "${found}" | awk -F= '$1 == "native" {print $2; exit}')"
+    case "${native}" in
+        ''|[!${ALNUM}]*|*[!${ALNUM}.+~^:_-]*) _api_answer_failed "${name} ${ver} has a version this channel will not write into ${INSTALLER}'s command line" ;;
+    esac
+    programs="$(printf "%s\\n" "${found}" | awk -F= '$1 == "cmd" {print $2}')"
+    _api_program_in "${programs}" "${want}" || _api_answer_failed "${name} ${why}"
+    program="${_api_program_in__out}"
+    if ! _api_is_program_name "${program}"; then
+        _api_answer_failed "${name} names a program this channel will not hand a runtime"
+    fi
+    _install_line "${name}" "${native}" || \
+        _api_answer_failed "${SELF_NAME} names an installer or a repository this channel will not write into a command line"
+    _api_image_in "${IMAGE}" "${REGISTRY}" "${REPOSITORY}" "${TAG}"
+    printf "image=%s\\n" "${_api_image_in__out}"
+    printf "install=%s\\n" "${_install_line__out}"
+    printf "bin=%s\\n" "${program}"
+    exit 0
+}
+
+case "${1}" in
+    meta)   _meta ;;
+    index)  _index "${2}" ;;
+    search) shift; _search "${@}" ;;
+    probe)  _probe "${2}" "${3}" ;;
+    recipe) _recipe "${2}" "${3}" "${4}" ;;
+
+    *) printf "%s\\n" "usage: ${SELF_NAME} meta|index|search|probe|recipe" >&2; exit 1 ;;
+esac

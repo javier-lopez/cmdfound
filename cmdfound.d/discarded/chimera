@@ -1,0 +1,3 @@
+#description: chimera - Chimera Linux, musl and LLVM, apk v3
+#decided: 2026-10-26
+#why: its signed apk v3 index has cmd: provides, but it adds 554 commands after the planned distros, half of them cross binutils

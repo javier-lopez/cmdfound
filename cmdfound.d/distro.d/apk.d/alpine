@@ -1,0 +1,23 @@
+#description: cmdfound channel - Alpine packages, installed by apk inside the image
+#usage: alpine meta | alpine index [bytes] | alpine search WORDS...
+#       alpine probe NAME [VER] | alpine recipe PACKAGE VER [PROGRAM]
+
+#Alpine's row in the apk channel
+DISTRO="Alpine"
+RELEASE="3.22"
+DISTRO_RELEASE="${DISTRO} ${RELEASE}"
+ARCHES="x86_64 aarch64 armv7 x86 ppc64le s390x riscv64"
+MIRROR="${CMDFOUND_ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
+REPOS_AT="${MIRROR}/v${RELEASE}"
+REPOS="main community"
+#main and community list a few packages twice (dotnet 8 and 9): the newest is
+#the one apk installs, so it is the one answered
+EVERY_VERSION="yes"
+REGISTRY="${CMDFOUND_ALPINE_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="library/alpine"
+TAG="${RELEASE}"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#what the image has, with all it depends on: alpine-minirootfs's /etc/apk/world
+#and what busybox wget needs to fetch over https. libc-utils is no package but
+#a name musl-utils provides
+BASE="alpine-baselayout alpine-keys alpine-release apk-tools busybox busybox-binsh ca-certificates-bundle libc-utils ssl_client"

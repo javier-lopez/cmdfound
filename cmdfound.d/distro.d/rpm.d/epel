@@ -1,0 +1,28 @@
+#description: cmdfound channel - EPEL and AlmaLinux packages, installed by dnf inside the image
+#usage: epel meta | epel index [bytes] | epel search WORDS...
+#       epel probe NAME [VER] | epel recipe PACKAGE VER [PROGRAM]
+#covers: almalinux, rocky, rhel, oracle-linux, centos-stream - EPEL 10 is built against RHEL 10, which AlmaLinux 10 rebuilds as Rocky does; Oracle Linux 10 adds 27 commands (ULN and rhn tools) and CentOS Stream 10 23 (versioned toolsets) (2026-10-26)
+
+#EPEL's row in the rpm channel: what RHEL 10 and its rebuilds run, AlmaLinux
+#10's BaseOS, AppStream and CRB, which EPEL needs, and EPEL 10 itself. The
+#image knows AlmaLinux's repositories, whose mirrorlist is cleared so that dnf
+#reads what the catalog was made from; EPEL it does not, and dnf is handed its
+#url and its key, which it imports over https and checks every rpm with
+DISTRO="EPEL"
+RELEASE="10"
+DISTRO_RELEASE="${DISTRO} ${RELEASE}"
+ARCHES="x86_64 aarch64 ppc64le s390x"
+MIRROR="${CMDFOUND_ALMALINUX_MIRROR:-https://repo.almalinux.org/almalinux}"
+REPOS_AT="${MIRROR}/${RELEASE}"
+EPEL="${CMDFOUND_EPEL_MIRROR:-https://dl.fedoraproject.org/pub/epel}"
+#each a dnf repository, named as the image names it or, for EPEL, as the recipe does
+REPOS="baseos=BaseOS/\$basearch/os appstream=AppStream/\$basearch/os crb=CRB/\$basearch/os epel=${EPEL}/${RELEASE}/Everything/\$basearch"
+KEYS="epel=${EPEL}/RPM-GPG-KEY-EPEL-${RELEASE}"
+INSTALLER="dnf"
+REGISTRY="${CMDFOUND_ALMALINUX_REGISTRY:-${DOCKER_HUB}}"
+REPOSITORY="library/almalinux"
+TAG="${RELEASE}"
+IMAGE="docker.io/${REPOSITORY}:${TAG}"
+#what the image was made with, dnf repoquery --userinstalled on 2026-10-26;
+#what they require is had too
+BASE="almalinux-release bash binutils coreutils-single crypto-policies-scripts curl findutils glibc-minimal-langpack gzip hostname iputils krb5-libs less libcurl-minimal python3-dnf-plugins-core rootfiles systemd tar vim-minimal xz yum"

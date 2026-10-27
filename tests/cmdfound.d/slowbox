@@ -30,6 +30,10 @@ case "${1}" in
 ${CMDFOUND_RECIPE}
 RECIPE
            [ -n "${bin}" ] || { printf "%s\n" "failed=no recipe to install ${2} with"; exit 1; }
+           #named in FAKE_BOX_FAIL, it fails every install, as fastbox does
+           case " ${FAKE_BOX_FAIL} " in
+               *" ${SELF_NAME} "*) printf "%s\n" "failed=${2} could not be installed in the fake image"; exit 1 ;;
+           esac
            [ -z "${FAKE_BOX_LOG}" ] || \
                printf "%s\n" "${SELF_NAME} obtain ${2} ${3} ${4} required=${CMDFOUND_REQUIRED-unset} bytes=${CMDFOUND_BYTES-unset} path=${PATH%%:*} recipe=${recipe}" >> "${FAKE_BOX_LOG}"
            run="run/${2}/${3}"; dir="${CMDFOUND_HOME}/channels/${SELF_NAME}/${run}"

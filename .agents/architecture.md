@@ -3,7 +3,16 @@
 ## Files
 
     cmdfound.in        the program, as developed (run it directly from a checkout)
-    cmdfound.d/        the channels, one executable sh file each, plus confined-launch
+    cmdfound.d/        the channels. One rule at every level: X is code and X.d/
+                       is what X serves or uses
+      am aqua ...      a channel, one executable sh file each
+      docker.d/        what docker uses: confined-launch (udocker loads it too)
+      distro           runs the distros' channels; not a channel itself
+      distro.d/        the package formats it serves: apk, apt, aptrpm, rpm, pacman
+        rpm.d/         rpm's rows, each a channel: fedora, opensuse, epel, rosa
+                       (apk.d/ alpine wolfi, apt.d/ ubuntu, aptrpm.d/ alt,
+                       pacman.d/ arch blackarch). A row is data only
+      discarded/       sources ruled out as channels, one note each with #why:
     cmdfound           built by ./build: cmdfound.in with the channels appended. Do not edit
     build              ./build [OUTPUT]
     .githooks/         pre-commit: builds from the index and stages cmdfound

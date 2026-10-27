@@ -21,6 +21,10 @@ homelook() { homel=""; homen=""; for homep in ${homeowned} ${homeshared}; do if 
 homecheck() { homerc="${?}"; homelook; [ X"${homel}" = X"${homewas}" ] && [ -z "${homen}" ] && exit "${homerc}"; printf '%s\n' "the block touched ${realhome}: there before:${homewas:- nothing}; there after:${homel:- nothing}; changed since it began:${homen:- nothing}" >&2; exit 1; }
 : > "${homeref}" && until [ "${homeref}.tick" -nt "${homeref}" ]; do : > "${homeref}.tick"; done && homelook && homewas="${homel}" && trap homecheck EXIT
 HOME="${PWD}/userhome"; export HOME; mkdir -p "${HOME}"
+#cmdfound is cmdfound.in, which reads the cmdfound.d beside it, so a change
+#is tested as it is written; what ./build makes of the two is held to them in
+#the last section, bundle, at the end of a cycle
+mkdir -p inbin && ln -s "$(cd ../.. && pwd)/cmdfound.in" inbin/cmdfound && PATH="$(pwd)/inbin:${PATH}" && export PATH
 unset XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_BIN_HOME CURL_HOME WGETRC ZDOTDIR APPSDB APPSLISTDB AQUA_ROOT_DIR AQUA_CONFIG AQUA_GLOBAL_CONFIG AQUA_POLICY_CONFIG TUF_ROOT GH_CONFIG_DIR CARGO_HOME CARGO_INSTALL_ROOT MAMBA_ROOT_PREFIX MAMBARC CONDARC MAMBA_OVERRIDE_RC_FILES CONDA_PKGS_DIRS CONDA_ENVS_DIRS CONDA_ENVS_PATH MAMBA_DEFAULT_ROOT_PREFIX MAMBA_TARGET_PREFIX CONDA_PREFIX CONDA_DEFAULT_ENV NP_LOCATION NP_CONF_STORE NIX_REMOTE NIX_STORE NIX_STORE_DIR NIX_STATE_DIR NIX_LOG_DIR NIX_DATA_DIR NIX_CONF_DIR NIX_DAEMON_SOCKET_PATH NIX_BIN_DIR NIX_LIBEXEC_DIR NIX_CONFIG NIX_USER_CONF_FILES NIX_CACHE_HOME NIX_CONFIG_HOME NIX_DATA_HOME NIX_STATE_HOME PROOT_TMP_DIR UDOCKER_DIR UDOCKER_KEYSTORE UDOCKER_TMP UDOCKER_BIN UDOCKER_LIB UDOCKER_DOC UDOCKER_REPOS UDOCKER_LAYERS UDOCKER_CONTAINERS UDOCKER_TARBALL DOCKER_CONFIG PKGX_DIR PKGX_PANTRY_DIR PKGX_PANTRY_DB_FILE PKGX_DIST_URL
 cmdfound -h; test X"${?}"                        = X"0"
 cmdfound --help; test X"${?}"                    = X"0"
@@ -56,11 +60,12 @@ CMDFOUND_NIX_PORTABLE_CHANNEL="$(pwd)/nixch"; export CMDFOUND_NIX_PORTABLE_CHANN
 #built as Alpine builds one, and an image registry laid out as its urls are.
 #The same files serve every architecture
 apfix="$(pwd)/apfix"; apmir="$(pwd)/apmir"; apreg="$(pwd)/apreg"; apsig=".SIGN.RSA.alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub"
-mkdir -p apfix/main apfix/community apfix/small
+mkdir -p apfix/main apfix/community apfix/small apfix/dup
 printf '%s\n' 'musl|1.2.5-r10|411323||so:libc.musl-x86_64.so.1=1|the musl c library' 'busybox|1.37.0-r18|521000|so:libc.musl-x86_64.so.1|cmd:busybox=1.37.0-r18|Size optimized toolbox' 'dash-binsh|0.5.12-r3|1500|dash|/bin/sh cmd:sh=0.5.12-r3|dash as /bin/sh' 'dash|0.5.12-r3|90000|so:libc.musl-x86_64.so.1|cmd:dash=0.5.12-r3|Small and fast POSIX shell' 'busybox-binsh|1.37.0-r18|1600|busybox=1.37.0-r18|/bin/sh cmd:sh=1.37.0-r18|busybox as /bin/sh' 'alpine-baselayout-data|3.7.0-r0|12000|||Alpine base dir structure' 'alpine-baselayout|3.7.0-r0|9000|alpine-baselayout-data=3.7.0-r0 /bin/sh||Alpine base dir structure and init scripts' 'alpine-keys|2.5-r0|13000|||Public keys for Alpine Linux packages' 'ca-certificates-bundle|20250619-r0|140000|||Pre generated bundle of Mozilla certificates' 'zlib|1.3.1-r2|53000|so:libc.musl-x86_64.so.1|so:libz.so.1=1.3.1|A compression library' 'libcrypto3|3.5.1-r0|1800000|so:libc.musl-x86_64.so.1|so:libcrypto.so.3=3|Crypto library from openssl' 'libssl3|3.5.1-r0|350000|so:libc.musl-x86_64.so.1 so:libcrypto.so.3|so:libssl.so.3=3|SSL shared libraries' 'apk-tools|2.14.9-r2|120000|musl>=1.2.3_git20230424 ca-certificates-bundle so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libssl.so.3 so:libz.so.1|so:libapk.so.2.14.0=2.14.0 cmd:apk=2.14.9-r2|Alpine Package Keeper' 'scanelf|1.3.8-r1|36000|so:libc.musl-x86_64.so.1|cmd:scanelf=1.3.8-r1|Scan ELF binaries' 'musl-utils|1.2.5-r10|40000|scanelf so:libc.musl-x86_64.so.1|cmd:getconf=1.2.5-r10 cmd:getent=1.2.5-r10 cmd:iconv=1.2.5-r10 cmd:ldconfig=1.2.5-r10 cmd:ldd=1.2.5-r10 libc-utils=1.2.5-r10|the musl c library utilities' 'alpine-release|3.22.5-r0|2096|alpine-keys||Alpine release data' 'alpine-conf|3.20.0-r0|40000|alpine-release scanelf|cmd:setup-alpine=3.20.0-r0|Alpine configuration scripts' 'ssl_client|1.37.0-r18|5000|so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libssl.so.3|cmd:ssl_client=1.37.0-r18|EXternal ssl_client for busybox wget' 'oniguruma|6.9.10-r0|200000|so:libc.musl-x86_64.so.1|so:libonig.so.5=5.4.0|a regular expressions library' 'jq|1.8.0-r0|150000|so:libc.musl-x86_64.so.1 so:libonig.so.5|cmd:jq=1.8.0-r0|A lightweight and flexible command-line JSON processor' 'jq-extra-more|1.8.0-r0|5000|||what jq-extra brings in turn|jq-extra' 'jq-extra|1.8.0-r0|3000|jq-extra-libs||extras that come with jq|jq' 'jq-extra-libs|1.0-r0|4000|||what jq-extra needs|' 'jq-doc|1.8.0-r0|6000|||jq documentation|docs jq' 'jq-nobusybox|1.8.0-r0|8000|||only where busybox is not|jq !busybox' 'jq-nodash|1.8.0-r0|9000|||only where dash is not|jq !dash' 'jq-onig|1.8.0-r0|2000|||comes with jq and whatever provides libonig|so:libonig.so.5 jq' 'pcre2|10.45-r0|260000|so:libc.musl-x86_64.so.1|so:libpcre2-8.so.0=10.45|Perl-compatible regular expression library' 'brotli-libs|1.1.0-r2|330000|so:libc.musl-x86_64.so.1|so:libbrotlicommon.so.1=1.1.0 so:libbrotlidec.so.1=1.1.0|Generic lossless compressor (libraries)' 'nghttp2-libs|1.65.0-r0|70000|so:libc.musl-x86_64.so.1|so:libnghttp2.so.14=14.28.4|Experimental HTTP/2 client, server and proxy (libraries)' 'libcurl|8.14.1-r1|390000|so:libbrotlidec.so.1 so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libnghttp2.so.14 so:libssl.so.3 so:libz.so.1|so:libcurl.so.4=4.8.0|The multiprotocol file transfer library' 'libexpat|2.7.1-r0|80000|so:libc.musl-x86_64.so.1|so:libexpat.so.1=1.10.2|XML Parser library written in C' 'git-init-template|2.49.1-r0|7000|git||Git init template|git=2.49.1-r0' 'git|2.49.1-r0|6500000|/bin/sh pcre2>=10 so:libc.musl-x86_64.so.1 so:libcurl.so.4 libexpat>=2.7 so:libpcre2-8.so.0 so:libz.so.1 so:libnothere.so.9 !git-big|cmd:git=2.49.1-r0 cmd:git-receive-pack=2.49.1-r0 cmd:git-shell=2.49.1-r0 cmd:scalar=2.49.1-r0|Distributed version control system' 'git-big|1.0-r0|99000000|||conflicts with git' 'nvi|1.81.6-r10|200000|so:libc.musl-x86_64.so.1|cmd:nvi=1.81.6-r10 cmd:vi=1.81.6-r10|A vi clone' 'vim|9.1.1-r0|1700000|so:libc.musl-x86_64.so.1|cmd:vi=9.1.1-r0 cmd:vim=9.1.1-r0 cmd:xxd=9.1.1-r0|Improved vi-style text editor' > apfix/main.spec
 { printf '%s\n' 'figlet|2.2.5-r3|154521|so:libc.musl-x86_64.so.1|cmd:chkfont=2.2.5-r3 cmd:figlet=2.2.5-r3 cmd:figlist=2.2.5-r3 cmd:showfigfonts=2.2.5-r3|Program for making large letters out of ordinary text' 'evil$(id)|1.0-r0|1000||cmd:evil=1.0-r0|a name no shell should read' 'evilver|1.0-r0$(id)|1000||cmd:evilver=1.0-r0|a version no shell should read' '-evil|1.0-r0|1000||cmd:dashevil=1.0-r0|a name apk would read as an option' 'R|4.5.1-r0|30000000|so:libc.musl-x86_64.so.1|cmd:R=4.5.1-r0 cmd:Rscript=4.5.1-r0|Language and environment for statistical computing'; i=0; while [ ${i} -lt 100 ]; do printf 'apfill%s|1.0-r0|1000|so:libc.musl-x86_64.so.1|cmd:apfill%s=1.0-r0|filler\n' "${i}" "${i}"; i=$((i+1)); done; } > apfix/community.spec
 printf '%s\n' 'lonely|1.0-r0|1000|||the only one' > apfix/small.spec
-for r in main community small; do awk -F'|' '{printf("C:Q1fixture=\nP:%s\nV:%s\nA:x86_64\nS:%s\nI:%s\nT:%s\nU:https://example.invalid\nL:MIT\no:%s\n", $1, $2, $3, $3 * 3, $6, $1); if ($4 != "") printf("D:%s\n", $4); if ($5 != "") printf("p:%s\n", $5); if ($7 != "") printf("i:%s\n", $7); printf("\n")}' "apfix/${r}.spec" > "apfix/${r}/APKINDEX" && printf '%s' 'not a real signature' > "apfix/${r}/${apsig}" && printf '%s\n' "fixture ${r}" > "apfix/${r}/DESCRIPTION" && (cd "apfix/${r}" && tar -cf sig.tar "${apsig}" && { dd if=sig.tar bs=512 count=2 2>/dev/null | gzip -n; tar -cf - DESCRIPTION APKINDEX | gzip -n; } > APKINDEX.tar.gz); done
+printf '%s\n' 'twice|8.0.1-r0|1000||cmd:twice=8.0.1-r0|listed first, the older' 'twice|9.0.1-r0|1000||cmd:twice=9.0.1-r0|listed again, the newer' | cat apfix/community.spec - > apfix/dup.spec
+for r in main community small dup; do awk -F'|' '{printf("C:Q1fixture=\nP:%s\nV:%s\nA:x86_64\nS:%s\nI:%s\nT:%s\nU:https://example.invalid\nL:MIT\no:%s\n", $1, $2, $3, $3 * 3, $6, $1); if ($4 != "") printf("D:%s\n", $4); if ($5 != "") printf("p:%s\n", $5); if ($7 != "") printf("i:%s\n", $7); printf("\n")}' "apfix/${r}.spec" > "apfix/${r}/APKINDEX" && printf '%s' 'not a real signature' > "apfix/${r}/${apsig}" && printf '%s\n' "fixture ${r}" > "apfix/${r}/DESCRIPTION" && (cd "apfix/${r}" && tar -cf sig.tar "${apsig}" && { dd if=sig.tar bs=512 count=2 2>/dev/null | gzip -n; tar -cf - DESCRIPTION APKINDEX | gzip -n; } > APKINDEX.tar.gz); done
 for r in main community; do mkdir -p "apmir/v3.22/${r}/x86_64" && cp "apfix/${r}/APKINDEX.tar.gz" "apmir/v3.22/${r}/x86_64/" && for a in aarch64 armv7 x86 ppc64le s390x riscv64; do ln -s x86_64 "apmir/v3.22/${r}/${a}"; done; done
 mkdir -p apreg/v2/library/alpine/manifests
 printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","size":840,"platform":{"architecture":"unknown","os":"unknown"}},{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":1022,"platform":{"architecture":"amd64","os":"linux"}},{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","size":1022,"platform":{"architecture":"arm64","os":"linux","variant":"v8"}}]}' > apreg/v2/library/alpine/manifests/3.22
@@ -69,6 +74,88 @@ printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.
 printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":581},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","size":4000000}]}' > apreg/v2/library/alpine/manifests/sha256:2222222222222222222222222222222222222222222222222222222222222222
 printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.in-toto+json","digest":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","size":167},"layers":[{"mediaType":"application/vnd.in-toto+json","digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","size":900}]}' > apreg/v2/library/alpine/manifests/sha256:3333333333333333333333333333333333333333333333333333333333333333
 CMDFOUND_ALPINE_MIRROR="${apmir}"; CMDFOUND_ALPINE_REGISTRY="${apreg}"; export CMDFOUND_ALPINE_MIRROR CMDFOUND_ALPINE_REGISTRY
+#Wolfi's as well: one repository, os, that keeps every version it ever built, in
+#no order, and an image of several layers whose index names no variant
+wofix="$(pwd)/wofix"; womir="$(pwd)/womir"; woreg="$(pwd)/woreg"; wosig=".SIGN.RSA256.wolfi-signing.rsa.pub"
+mkdir -p wofix/os && { printf '%s\n' 'wolfi-baselayout|20230201-r30|9000|||Wolfi base dir structure' 'wolfi-keys|1-r14|5000|||Wolfi signing keys' 'ca-certificates-bundle|20260909-r3|140000|||Mozilla certificates' 'glibc-2.44|2.44-r9|2600000|wolfi-baselayout|so:libc.so.6=6 so:ld-linux-x86-64.so.2=2|the GNU C library' 'busybox|1.38.0-r3|900000|so:libc.so.6|cmd:busybox=1.38.0-r3 cmd:sh=1.38.0-r3|busybox' 'apk-tools|2.14.10-r17|300000|so:libc.so.6 ca-certificates-bundle|cmd:apk=2.14.10-r17|apk' 'wolfi-base|1-r7|1000|apk-tools busybox wolfi-keys||Wolfi base' 'oniguruma|6.9.10-r2|200000|so:libc.so.6|so:libonig.so.5=5|a regular expressions library' 'jq|1.7.1-r4|150000|so:libc.so.6 so:libonig.so.5|cmd:jq=1.7.1-r4 cmd:jq-old=1.7.1-r4|an old jq' 'jq|1.8.2-r3|160000|so:libc.so.6 so:libonig.so.5|cmd:jq=1.8.2-r3|lightweight and flexible JSON processor' 'jq|1.6-r2|140000|so:libc.so.6|cmd:jq=1.6-r2|an older jq' 'jq|1.8.2_rc1-r9|155000|so:libc.so.6|cmd:jq=1.8.2_rc1-r9|a candidate jq' 'vt|1.2_rc1-r0|1000||cmd:vt=1.2_rc1-r0|order' 'vt|1.2-r0|1000||cmd:vt=1.2-r0|order' 'vp|1.2-r0|1000||cmd:vp=1.2-r0|order' 'vp|1.2_p1-r0|1000||cmd:vp=1.2_p1-r0|order' 'vl|1.2_p1-r0|1000||cmd:vl=1.2_p1-r0|order' 'vl|1.2a-r0|1000||cmd:vl=1.2a-r0|order' 'vn|1.9-r3|1000||cmd:vn=1.9-r3|order' 'vn|1.10-r0|1000||cmd:vn=1.10-r0|order'; i=0; while [ ${i} -lt 100 ]; do printf 'wofill%s|1.0-r0|1000|so:libc.so.6|cmd:wofill%s=1.0-r0|filler\n' "${i}" "${i}"; i=$((i+1)); done; } > wofix/os.spec
+awk -F'|' '{printf("C:Q1fixture=\nP:%s\nV:%s\nA:x86_64\nS:%s\nI:%s\nT:%s\nL:MIT\no:%s\nt:0\n", $1, $2, $3, $3 * 3, $6, $1); if ($4 != "") printf("D:%s\n", $4); if ($5 != "") printf("p:%s\n", $5); printf("\n")}' wofix/os.spec > wofix/os/APKINDEX && printf '%s' 'not a real signature' > "wofix/os/${wosig}" && : > wofix/os/DESCRIPTION && (cd wofix/os && tar -cf sig.tar "${wosig}" && { dd if=sig.tar bs=512 count=2 2>/dev/null | gzip -n; tar -cf - APKINDEX DESCRIPTION | gzip -n; } > APKINDEX.tar.gz)
+mkdir -p womir/os/x86_64 && cp wofix/os/APKINDEX.tar.gz womir/os/x86_64/ && ln -s x86_64 womir/os/aarch64
+mkdir -p woreg/v2/chainguard/wolfi-base/manifests && printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","size":2503,"digest":"sha256:5555555555555555555555555555555555555555555555555555555555555555","platform":{"architecture":"amd64","os":"linux"}},{"mediaType":"application/vnd.oci.image.manifest.v1+json","size":2503,"digest":"sha256:6666666666666666666666666666666666666666666666666666666666666666","platform":{"architecture":"arm64","os":"linux"}}]}' > woreg/v2/chainguard/wolfi-base/manifests/latest && cp woreg/v2/chainguard/wolfi-base/manifests/latest "woreg/v2/chainguard/wolfi-base/manifests/sha256:$(sha256sum woreg/v2/chainguard/wolfi-base/manifests/latest | awk '{print $1}')"
+printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":3357067},{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":2938749},{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":513556}]}' > woreg/v2/chainguard/wolfi-base/manifests/sha256:5555555555555555555555555555555555555555555555555555555555555555
+printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":7000000}]}' > woreg/v2/chainguard/wolfi-base/manifests/sha256:6666666666666666666666666666666666666666666666666666666666666666
+CMDFOUND_WOLFI_MIRROR="${womir}"; CMDFOUND_WOLFI_REGISTRY="${woreg}"; export CMDFOUND_WOLFI_MIRROR CMDFOUND_WOLFI_REGISTRY
+#Ubuntu's too: an archive with the release and its -updates, each with the four
+#components' Commands and Packages, the hashes in an InRelease that is not
+#signed. The release says Acquire-By-Hash, and its files by name are those of a
+#mirror half way through an update, so only fetching by hash reads it right.
+#A spec line is package|version|size|depends|pre-depends|provides|commands|description,
+#with OR for a | between alternatives
+ubfix="$(pwd)/ubfix"; ubmir="$(pwd)/ubmir"; ubreg="$(pwd)/ubreg"; mkdir -p ubfix
+printf '%s\n' 'libc6|2.43-2ubuntu2|3000000|||||GNU C Library: Shared libraries' 'perl-base|5.40.1-7|2000000|libc6||perlapi-5.40.1||minimal Perl system' 'mawk|1.3.4-1|100000|libc6||awk|awk,mawk,nawk|Pattern scanning and text processing language' 'perl-modules-5.40|5.40.1-7|3000000|perl-base|||Core Perl modules' 'perl|5.40.1-7|250000|perl-base, perl-modules-5.40 (>= 5.40.1-7), libc6 (>= 2.38)|||Practical Extraction and Report Language' 'git-man|1:2.53.0-1ubuntu1|500000||||fast, scalable, distributed revision control system (manual pages)' 'git|1:2.53.0-1ubuntu1|4000000|libc6 (>= 2.42), perl, git-man (>> 1:2.53.0)|||git,git-shell,scalar|fast, scalable, distributed revision control system' 'hello|2.10-5|50000|libc6 (>= 2.34)|||hello|example package based on GNU hello' 'netcat-openbsd|1.229-1|45000|libc6|||nc,netcat|TCP/IP swiss army knife' 'netcat-traditional|1.10-48|60000|libc6|||nc,nc.traditional,netcat|TCP/IP swiss army knife' > ubfix/resolute.main.spec
+{ printf '%s\n' 'cowsay|3.03+dfsg2-8|20000|perl:any|||cowsay,cowthink|configurable talking cow' 'lzip|1.26~rc1-2|88000|libc6|||lzip,lzip.lzip|lossless data compressor based on the LZMA algorithm' 'plzip|1.11-1|70000|libc6|||lzip,lzip.plzip,plzip|parallel, lossless data compressor' 'ubalt|1.0-1|1000|ubnothere OR hello|||ubalt|takes the first alternative that is a package' 'ubalt2|1.0-1|1000|hello OR mawk|||ubalt2|has one alternative already' 'ubvirt-user|1.0-1|1000|ubvirt|||ubvirt-user|needs what another package provides' 'ubprov|1.0-1|7000|||ubvirt (= 1.0)||provides ubvirt' 'ubpre|1.0-1|1000||hello||ubpre|needs hello before it is unpacked' 'evil$(id)|1.0-1|1000||||evil|a name no shell should read' 'evilver|1.0$(id)-1|1000||||evilver|a version no shell should read'; i=0; while [ ${i} -lt 100 ]; do printf 'ubfill%s|1.0-1|1000|libc6|||ubfill%s|filler\n' "${i}" "${i}"; i=$((i+1)); done; } > ubfix/resolute.universe.spec
+printf '%s\n' 'ubnonfree|1.0-1|1000||||ubnonfree|a restricted one' > ubfix/resolute.restricted.spec && printf '%s\n' 'ubmulti|1.0-1|1000||||ubmulti|a multiverse one' > ubfix/resolute.multiverse.spec
+printf '%s\n' 'git-man|1:2.53.0-1ubuntu1.1|510000||||fast, scalable, distributed revision control system (manual pages)' 'git|1:2.53.0-1ubuntu1.1|4100000|libc6 (>= 2.42), perl, git-man (>> 1:2.53.0)|||git,git-receive-pack,git-shell,scalar|fast, scalable, distributed revision control system' > ubfix/resolute-updates.main.spec && : > ubfix/resolute-updates.universe.spec && : > ubfix/resolute-updates.restricted.spec && : > ubfix/resolute-updates.multiverse.spec
+for f in ubfix/*.spec; do b="${f%.spec}"; s="${b#ubfix/}"; s="${s%%.*}"; c="${b##*.}"; awk -F'|' '{gsub(/ OR /, " | ", $4); printf("Package: %s\nArchitecture: amd64\nVersion: %s\nPriority: optional\nInstalled-Size: %d\n", $1, $2, $3 / 1024); if ($4 != "") printf("Depends: %s\n", $4); if ($5 != "") printf("Pre-Depends: %s\n", $5); if ($6 != "") printf("Provides: %s\n", $6); printf("Filename: pool/%s.deb\nSize: %s\nDescription: %s\n a longer text, which is not read\n\n", $1, $3, $8)}' "${f}" | xz -c > "${b}.pkg.xz" && { printf 'suite: %s\ncomponent: %s\narch: amd64\n\n\n' "${s}" "${c}"; awk -F'|' '$7 != "" {printf("name: %s\nversion: %s\ncommands: %s\n\n", $1, $2, $7)}' "${f}"; } | xz -c > "${b}.cnf.xz" || exit 1; done
+for s in resolute resolute-updates; do for c in main restricted universe multiverse; do mkdir -p "ubmir/dists/${s}/${c}/cnf" "ubmir/dists/${s}/${c}/binary-amd64" && cp "ubfix/${s}.${c}.cnf.xz" "ubmir/dists/${s}/${c}/cnf/Commands-amd64.xz" && cp "ubfix/${s}.${c}.pkg.xz" "ubmir/dists/${s}/${c}/binary-amd64/Packages.xz" || exit 1; done; done
+for s in resolute resolute-updates; do (cd "ubmir/dists/${s}" && { printf '%s\n' '-----BEGIN PGP SIGNED MESSAGE-----' 'Hash: SHA512' '' 'Origin: Ubuntu' "Suite: ${s}" 'Components: main restricted universe multiverse' 'MD5Sum:'; for f in */cnf/Commands-amd64.xz */binary-amd64/Packages.xz; do printf ' %s %16s %s\n' 00000000000000000000000000000000 "$(wc -c < "${f}" | awk '{print $1}')" "${f}"; done; printf '%s\n' 'SHA256:'; for f in */cnf/Commands-amd64.xz */binary-amd64/Packages.xz; do printf ' %s %16s %s\n' "$(sha256sum "${f}" | awk '{print $1}')" "$(wc -c < "${f}" | awk '{print $1}')" "${f}"; done; [ X"${s}" = X"resolute" ] && printf '%s\n' 'Acquire-By-Hash: yes'; printf '%s\n' '-----BEGIN PGP SIGNATURE-----' '' 'not a real signature' '-----END PGP SIGNATURE-----'; } > InRelease) || exit 1; done
+for f in ubmir/dists/resolute/*/cnf/Commands-amd64.xz ubmir/dists/resolute/*/binary-amd64/Packages.xz; do mkdir -p "${f%/*}/by-hash/SHA256" && cp "${f}" "${f%/*}/by-hash/SHA256/$(sha256sum "${f}" | awk '{print $1}')" && printf '%s\n' 'a mirror half way through an update' | xz -c > "${f}" || exit 1; done
+mkdir -p ubreg/v2/library/ubuntu/manifests && printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:7777777777777777777777777777777777777777777777777777777777777777","size":424,"platform":{"architecture":"amd64","os":"linux"}},{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:8888888888888888888888888888888888888888888888888888888888888888","size":424,"platform":{"architecture":"arm64","os":"linux","variant":"v8"}}]}' > ubreg/v2/library/ubuntu/manifests/26.04 && cp ubreg/v2/library/ubuntu/manifests/26.04 "ubreg/v2/library/ubuntu/manifests/sha256:$(sha256sum ubreg/v2/library/ubuntu/manifests/26.04 | awk '{print $1}')"
+printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":29000000}]}' > ubreg/v2/library/ubuntu/manifests/sha256:7777777777777777777777777777777777777777777777777777777777777777 && printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":28000000}]}' > ubreg/v2/library/ubuntu/manifests/sha256:8888888888888888888888888888888888888888888888888888888888888888
+CMDFOUND_UBUNTU_MIRROR="${ubmir}"; CMDFOUND_UBUNTU_REGISTRY="${ubreg}"; export CMDFOUND_UBUNTU_MIRROR CMDFOUND_UBUNTU_REGISTRY
+#Fedora's catalog: its two repositories, releases and updates, each a repomd.xml
+#naming a primary.xml by its sha256, laid out as createrepo_c lays one out, on a
+#mirror here, and an image registry. Packages for i686 are listed beside x86_64's
+fdfix="$(pwd)/fdfix"; fdmir="$(pwd)/fdmir"; fdreg="$(pwd)/fdreg"; fdrel="${fdmir}/releases/44/Everything/x86_64/os"; fdupd="${fdmir}/updates/44/Everything/x86_64"
+mkdir -p fdfix && { printf '%s\n' 'filesystem|0|3.18|2.fc44|x86_64|1000||||The basic directory layout|' 'glibc|0|2.43|5.fc44|x86_64|2600000|filesystem|libc.so.6()(64bit),libc.so.6(GLIBC_2.34)(64bit)|/usr/bin/ldd,/usr/sbin/ldconfig,/usr/share/glibc/|The GNU libc libraries|' 'glibc|0|2.44|1.fc44|i686|2500000||libc.so.6|/usr/bin/ldd|The GNU libc libraries, for i686|' 'only32|0|1.0|1.fc44|i686|1000|||/usr/bin/only32|built for i686 alone|' 'bash|0|5.3.0|2.fc44|x86_64|1900000|libc.so.6()(64bit),rpmlib(CompressedFileNames)|/bin/sh,/bin/bash|/usr/bin/bash,/usr/bin/sh|The GNU Bourne Again shell|' 'oniguruma|0|6.9.10|4.fc44|x86_64|220000|libc.so.6()(64bit)|libonig.so.5()(64bit)||Regular expressions library|' 'jq|0|1.8.1|2.fc44|x86_64|210000|libc.so.6()(64bit),libonig.so.5()(64bit)||/usr/bin/jq|Command-line JSON processor|' 'recommended-thing|0|1.0|1.fc44|noarch|50000000||||what jq only recommends|' 'figlet|0|2.2.5|39.fc44|x86_64|142132|libc.so.6()(64bit)||/usr/bin/chkfont,/usr/bin/figlet,/usr/bin/figlist,/usr/bin/showfigfonts|Program for making large letters out of ordinary text|' 'toilet|0|0.3|1.fc44|x86_64|60000|libc.so.6()(64bit)||/usr/bin/toilet|Color letters &amp; fonts for the terminal|' 'vim-data|2|9.2.240|1.fc44|noarch|30000||||Shared data for Vi and Vim|' 'vim-common|2|9.2.240|1.fc44|x86_64|7000000|||/usr/bin/xxd|The common files of the VIM editor|' 'vim-enhanced|2|9.2.240|1.fc44|x86_64|1900000|vim-common,(vim-data if vim-minimal),libc.so.6()(64bit)||/usr/bin/vim,/usr/bin/vimdiff|The VIM editor with recent enhancements|' 'vim-minimal|2|9.2.240|1.fc44|x86_64|800000|libc.so.6()(64bit)||/usr/bin/vi,/usr/bin/view|A minimal version of the VIM editor|' 'nvi|0|1.81.6|30.fc44|x86_64|200000|libc.so.6()(64bit)||/usr/bin/nvi,/usr/bin/vi|4.4BSD re-implementation of vi|' 'python3|0|3.14.8|1.fc44|x86_64|40000|libc.so.6()(64bit)|python(abi)|/usr/bin/python3|Python 3 interpreter|' 'pyscript|0|1.0|1.fc44|noarch|3000|/usr/bin/python3||/usr/bin/pyscript|A script that needs python3|' 'epo|1|1.0|1.fc44|x86_64|1000|||/usr/bin/epo|an epoch over a higher version|' 'vt|0|1.9~rc1|1.fc44|x86_64|1000|||/usr/bin/vt|order|' 'vc|0|1.9^git1|1.fc44|x86_64|1000|||/usr/bin/vc|order|' 'vn|0|1.10|1.fc44|x86_64|1000|||/usr/bin/vn|order|' 'vr|0|1.0|10.fc44|x86_64|1000|||/usr/bin/vr|order|' 'va|0|1.0.1|1.fc44|x86_64|1000|||/usr/bin/va|order|' 'tilde|0|2.0~beta1|1.fc44|x86_64|1000|||/usr/bin/tilde|a version with a tilde|' 'caret|0|2.0^git1|1.fc44|x86_64|1000|||/usr/bin/caret|a version with a caret|' 'evil$(id)|0|1.0|1.fc44|x86_64|1000|||/usr/bin/evil|a name no shell should read|' 'evilver|0|1.0|1$(id)|x86_64|1000|||/usr/bin/evilver|a release no shell should read|' '-evil|0|1.0|1.fc44|x86_64|1000|||/usr/bin/dashevil|a name dnf would read as an option|'; i=0; while [ ${i} -lt 100 ]; do printf 'fdfill%s|0|1.0|1.fc44|x86_64|1000|libc.so.6()(64bit)||/usr/bin/fdfill%s|filler|\n' "${i}" "${i}"; i=$((i+1)); done; } > fdfix/releases.spec
+printf '%s\n' 'jq|0|1.8.1|3.fc44|x86_64|232514|libc.so.6()(64bit),libonig.so.5()(64bit)||/usr/bin/jq|Command-line JSON processor|recommended-thing' 'vim-common|2|9.2.1202|1.fc44|x86_64|7050000|||/usr/bin/xxd|The common files of the VIM editor|' 'vim-enhanced|2|9.2.1202|1.fc44|x86_64|1950000|vim-common,(vim-data if vim-minimal),libc.so.6()(64bit)||/usr/bin/vim,/usr/bin/vimdiff|The VIM editor with recent enhancements|' 'epo|0|9.0|1.fc44|x86_64|1000|||/usr/bin/epo|a higher version under a lower epoch|' 'vt|0|1.9|1.fc44|x86_64|1000|||/usr/bin/vt|order|' 'vc|0|1.9.1|1.fc44|x86_64|1000|||/usr/bin/vc|order|' 'vn|0|1.9|1.fc44|x86_64|1000|||/usr/bin/vn|order|' 'vr|0|1.0|9.fc44|x86_64|1000|||/usr/bin/vr|order|' 'va|0|1.0a|1.fc44|x86_64|1000|||/usr/bin/va|order|' > fdfix/updates.spec
+sh ../cmdfound.d/fake-createrepo fdfix/releases.spec "${fdrel}" sha256 zst && sh ../cmdfound.d/fake-createrepo fdfix/updates.spec "${fdupd}" sha256 zst
+mkdir -p fdreg/v2/library/fedora/manifests && printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","size":529,"digest":"sha256:7777777777777777777777777777777777777777777777777777777777777777","platform":{"architecture":"amd64","os":"linux"}},{"mediaType":"application/vnd.oci.image.manifest.v1+json","size":529,"digest":"sha256:8888888888888888888888888888888888888888888888888888888888888888","platform":{"architecture":"arm64","os":"linux","variant":"v8"}}]}' > fdreg/v2/library/fedora/manifests/44 && cp fdreg/v2/library/fedora/manifests/44 "fdreg/v2/library/fedora/manifests/sha256:$(sha256sum fdreg/v2/library/fedora/manifests/44 | awk '{print $1}')"
+printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":69396734}]}' > fdreg/v2/library/fedora/manifests/sha256:7777777777777777777777777777777777777777777777777777777777777777
+CMDFOUND_FEDORA_MIRROR="${fdmir}"; CMDFOUND_FEDORA_REGISTRY="${fdreg}"; export CMDFOUND_FEDORA_MIRROR CMDFOUND_FEDORA_REGISTRY
+#and openSUSE Tumbleweed's: one repository, its primary.xml named by its
+#sha512 and compressed with gzip
+osfix="$(pwd)/osfix"; osmir="$(pwd)/osmir"; osreg="$(pwd)/osreg"; ososs="${osmir}/tumbleweed/repo/oss"
+mkdir -p osfix && { printf '%s\n' 'glibc|0|2.42|3.1|x86_64|1500000||libc.so.6()(64bit),libc.so.6(GLIBC_2.38)(64bit)|/usr/bin/ldd|Standard Shared Libraries (from the GNU C Library)|' 'glibc|0|2.42|3.1|i586|1400000||libc.so.6|/usr/bin/ldd|Standard Shared Libraries, for i586|' 'bash|0|5.3.3|1.1|x86_64|500000|libc.so.6()(64bit)|/bin/sh|/usr/bin/bash|The GNU Bourne-Again Shell|' 'libonig5|0|6.9.10|2.5|x86_64|192286|libc.so.6()(64bit)|libonig.so.5()(64bit)||Regular expressions library|' 'libjq1|0|1.8.2|3.1|x86_64|169165|libc.so.6()(64bit),libonig.so.5()(64bit)|libjq.so.1()(64bit)||Library for jq|' 'jq|0|1.8.2|3.1|x86_64|99111|libjq.so.1()(64bit),libjq1,libonig.so.5()(64bit),libc.so.6(GLIBC_2.38)(64bit)||/usr/bin/jq|A lightweight and flexible command-line JSON processor|'; i=0; while [ ${i} -lt 100 ]; do printf 'osfill%s|0|1.0|1.1|noarch|1000|||/usr/bin/osfill%s|filler|\n' "${i}" "${i}"; i=$((i+1)); done; } > osfix/oss.spec
+sh ../cmdfound.d/fake-createrepo osfix/oss.spec "${ososs}" sha512 gz
+mkdir -p osreg/v2/opensuse/tumbleweed/manifests && printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","size":529,"digest":"sha256:9999999999999999999999999999999999999999999999999999999999999999","platform":{"architecture":"amd64","os":"linux"}}]}' > osreg/v2/opensuse/tumbleweed/manifests/latest && cp osreg/v2/opensuse/tumbleweed/manifests/latest "osreg/v2/opensuse/tumbleweed/manifests/sha256:$(sha256sum osreg/v2/opensuse/tumbleweed/manifests/latest | awk '{print $1}')"
+printf '%s' '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","size":43724643}]}' > osreg/v2/opensuse/tumbleweed/manifests/sha256:9999999999999999999999999999999999999999999999999999999999999999
+CMDFOUND_OPENSUSE_MIRROR="${osmir}"; CMDFOUND_OPENSUSE_REGISTRY="${osreg}"; export CMDFOUND_OPENSUSE_MIRROR CMDFOUND_OPENSUSE_REGISTRY
+#EPEL's mirror and AlmaLinux's hold Fedora's repositories: what differs is
+#where they are and how dnf is told of them. No registry has its image
+epmir="$(pwd)/epmir"; epepel="$(pwd)/epepel"; epreg="$(pwd)/epnoreg"
+for r in BaseOS AppStream CRB; do mkdir -p "epmir/10/${r}/x86_64/os" && cp -R "${fdrel}/repodata" "epmir/10/${r}/x86_64/os/" || exit 1; done
+mkdir -p epepel/10/Everything/x86_64 && cp -R "${fdupd}/repodata" epepel/10/Everything/x86_64/
+CMDFOUND_ALMALINUX_MIRROR="${epmir}"; CMDFOUND_EPEL_MIRROR="${epepel}"; CMDFOUND_ALMALINUX_REGISTRY="${epreg}"; export CMDFOUND_ALMALINUX_MIRROR CMDFOUND_EPEL_MIRROR CMDFOUND_ALMALINUX_REGISTRY
+#Arch's mirror and BlackArch's, their databases written by fake-pacdb: Arch's
+#with each package's desc first, BlackArch's with its files first, as each
+#writes them. A hundred fillers make a catalog this reader takes. No registry
+#has their images
+pcmir="$(pwd)/pcmir"; pcba="$(pwd)/pcba"; pcdb="$(cd .. && pwd)/cmdfound.d/fake-pacdb"
+mkdir -p pcmir/core/os/x86_64 pcmir/extra/os/x86_64 pcmir/multilib/os/x86_64 pcba/blackarch/os/x86_64
+printf '%s\n' 'glibc|2.44-1|10000000|||usr/,usr/bin/,usr/bin/ldd|GNU C Library' 'bash|5.3-1|2000000|glibc||usr/bin/bash|The GNU Bourne Again shell' > pccore
+{ printf '%s\n' 'jq|1.8.2-1|400000|oniguruma,glibc>=2.40||usr/,usr/bin/,usr/bin/jq|Command-line JSON processor' 'oniguruma|6.9-1|200000||libonig.so=5-64|usr/lib/libonig.so.5|a regular expressions library' 'nmap|7.992-1|2000000|lua54,libonig.so=5-64||usr/bin/nmap,usr/share/nmap/|Utility for network discovery' 'lua54|5.4.8-1|300000|||usr/bin/lua5.4|Lua' 'epo|1:2.0-1|1000|||usr/bin/epo|a version with an epoch' 'python|3.14-1|9000000|||usr/bin/python3|The Python language'; i=0; while [ "${i}" -lt 100 ]; do i=$((i + 1)); printf 'fill%s|1.0-1|10|||usr/bin/fill%s|filler\n' "${i}" "${i}"; done; } > pcextra
+printf '%s\n' 'lib32-glibc|2.44-1|5000000|glibc||usr/lib32/libc.so.6|GNU C Library, 32-bit' > pcmulti
+printf '%s\n' 'intrace|1.6-1|17475|glibc||usr/bin/intrace|Traceroute-like application piggybacking on existing TCP connections' 'myjwt|2.1-1|50000|python||usr/bin/myjwt|a JWT pentest tool' 'jq|9.9-1|1|||usr/bin/jq|a jq Arch has as well' > pcblack
+for r in core:pccore extra:pcextra multilib:pcmulti; do for k in files db; do sh "${pcdb}" "pcmir/${r%%:*}/os/x86_64/${r%%:*}.${k}" "${k}" desc-first < "${r#*:}" || exit 1; done; done
+sh "${pcdb}" pcba/blackarch/os/x86_64/blackarch.files files files-first < pcblack
+#Chaotic-AUR's, zstd and under $repo/$arch, with no os/ between them
+pcaur="$(pwd)/pcaur"; mkdir -p pcaur/chaotic-aur/x86_64
+printf '%s\n' 'auracle-git|r464.885e962-1.1|300000|jq||usr/bin/auracle|A flexible command line client for Arch Linux User Repository' 'jq|9.9-1|1|||usr/bin/jq|a jq Arch has as well' | sh "${pcdb}" pcaur/chaotic-aur/x86_64/chaotic-aur.files files desc-first zstd
+CMDFOUND_CHAOTIC_MIRROR="${pcaur}"; export CMDFOUND_CHAOTIC_MIRROR
+CMDFOUND_ARCH_MIRROR="${pcmir}"; CMDFOUND_BLACKARCH_MIRROR="${pcba}"; CMDFOUND_ARCH_REGISTRY="$(pwd)/pcnoreg"; CMDFOUND_BLACKARCH_REGISTRY="$(pwd)/pcnoreg"; export CMDFOUND_ARCH_MIRROR CMDFOUND_BLACKARCH_MIRROR CMDFOUND_ARCH_REGISTRY CMDFOUND_BLACKARCH_REGISTRY
+#ROSA's mirror holds Fedora's repositories as well, laid out as ROSA lays its
+#own: main, contrib and non-free, each one release. No registry has its image
+rsmir="$(pwd)/rsmir"
+for r in main:"${fdrel}" contrib:"${fdupd}" non-free:"${fdupd}"; do mkdir -p "rsmir/rosa13/repository/x86_64/${r%%:*}/release" && cp -R "${r#*:}/repodata" "rsmir/rosa13/repository/x86_64/${r%%:*}/release/" || exit 1; done
+CMDFOUND_ROSA_MIRROR="${rsmir}"; CMDFOUND_ROSA_REGISTRY="$(pwd)/rsnoreg"; export CMDFOUND_ROSA_MIRROR CMDFOUND_ROSA_REGISTRY
+#ALT's mirror: p11's x86_64 and noarch, each a pkglist written by fake-pkglist
+#and a release listing its BLAKE2b, as ALT's do. No registry has its image
+almir="$(pwd)/almir"; alpl="$(cd .. && pwd)/cmdfound.d/fake-pkglist"
+mkdir -p almir/p11/branch/x86_64/base almir/p11/branch/noarch/base
+{ printf '%s\n' 'bash||5.2.37|alt1|1000000|The GNU Bourne Again shell|||/bin/bash,/bin/sh' 'glibc-core||2.38|alt1|5000000|The GNU libc|libc.so.6()(64bit)||/lib64/libc.so.6' 'jq|1|1.8.2|alt1|400000|Command-line JSON processor||libonig.so.5()(64bit),/bin/sh,rpmlib(PayloadIsXz)|/usr/bin/jq' 'libonig||6.9|alt1|200000|a regular expressions library|libonig.so.5()(64bit)||/usr/lib64/libonig.so.5' 'cindent||2.0.20230205|alt1|80000|GNU indent, as lnx-indent|||/usr/bin/lnx-indent' 'acpid|1|2.0.32|alt2|100000|ACPI event daemon|||/usr/sbin/acpid'; i=0; while [ "${i}" -lt 100 ]; do i=$((i + 1)); printf 'fill%s||1.0|alt1|10|filler|||/usr/bin/fill%s\n' "${i}" "${i}"; done; } | sh "${alpl}" | xz -c > almir/p11/branch/x86_64/base/pkglist.classic.xz
+printf '%s\n' 'GNUWash||0.1|alt1|5000|wash a GNUstep|||/usr/bin/GNUWash' | sh "${alpl}" | xz -c > almir/p11/branch/noarch/base/pkglist.classic.xz
+for d in x86_64 noarch; do printf '%s\n' 'Origin: ALT Linux Team' 'MD5Sum:' " 0 0 base/pkglist.classic.xz" 'BLAKE2b:' " $(if command -v b2sum >/dev/null 2>&1; then b2sum "almir/p11/branch/${d}/base/pkglist.classic.xz" | awk '{print $1}'; else openssl dgst -blake2b512 "almir/p11/branch/${d}/base/pkglist.classic.xz" | awk '{print $NF}'; fi) $(wc -c < "almir/p11/branch/${d}/base/pkglist.classic.xz" | awk '{print $1}') base/pkglist.classic.xz" > "almir/p11/branch/${d}/base/release" || exit 1; done
+CMDFOUND_ALT_MIRROR="${almir}"; CMDFOUND_ALT_REGISTRY="$(pwd)/alnoreg"; export CMDFOUND_ALT_MIRROR CMDFOUND_ALT_REGISTRY
 #and udocker's PyPI and engines are paths here, which only udocker's tests fill
 CMDFOUND_UDOCKER_PYPI="$(pwd)/udpypi"; CMDFOUND_UDOCKER_ENGINES="$(pwd)/udengines.tar.gz"; export CMDFOUND_UDOCKER_PYPI CMDFOUND_UDOCKER_ENGINES
 #@section{resolve}
@@ -109,6 +196,13 @@ test X"$(g_list=1 CMDFOUND_HOME="$(pwd)/envh" cmdfound -n tiny 2>&1 | tail -1)" 
 #was this machine. A _JAVA_OPTIONS of theirs is not one of ours and stays
 printf '%s\n' '_util_machine_in; printf "%s\n" "${_util_machine_in__os} ${_JAVA_OPTIONS}"' > envmine/machine
 test X"$(_util_machine_in__os=Darwin _JAVA_OPTIONS=-Xmx1g CMDFOUND_HOME="$(pwd)/envh" cmdfound --channel "$(pwd)/envmine/machine")" = X"$(uname -s) -Xmx1g"
+#the clock is in milliseconds where date says nanoseconds, and in whole seconds
+#where it does not: busybox expands %N to nothing and BSD to an N, and neither
+#is read as nanoseconds, which made busybox's clock stand still
+mkdir -p nowms && cp ../cmdfound.d/fake-date nowms/date && chmod 755 nowms/date
+printf '%s\n' '_util_now_ms' > nowms/now
+nowreal="$(command -v date)"
+for nowbsd in "" 1; do nowms="$(FAKE_DATE_BSD="${nowbsd}" FAKE_DATE_REAL="${nowreal}" PATH="$(pwd)/nowms:${PATH}" CMDFOUND_HOME="$(pwd)/envh" cmdfound --channel "$(pwd)/nowms/now")" && test X"$(( nowms % 1000 ))" = X"0" && test "$(( $(date +%s) - nowms / 1000 ))" -le "2" || exit 1; done
 #@section{hook}
 #--hook prints the function a shell calls for a missing command, named as
 #each shell names it
@@ -131,27 +225,14 @@ test X"$(cat hookstub/args)" = X"[--][nosuchcmdxyz][a b][c]"
 rm -f hookstub/args
 CMDFOUND_HOOK=1 PATH="${hookpath}" bash --norc -i -c '. ./cfhook.sh; nosuchcmdxyz' >/dev/null 2>&1; test X"${?}" = X"127"
 test ! -e hookstub/args
-#@section{bundle}
-#the cmdfound published is ./build's output, and the one here is current
-../../build "$(pwd)/fresh" && cmp -s fresh ../../cmdfound
-#with no cmdfound.d beside it and none named, it writes the channels it
-#carries out once under its home, each as it is in cmdfound.d
-mkdir -p bun && cp ../../cmdfound bun/cmdfound
-test X"$(unset CMDFOUND_CHANNELS; CMDFOUND_HOME="$(pwd)/bunh" bun/cmdfound --channel github meta | head -1)" = X"aliases=gh"
-for f in ../../cmdfound.d/*; do [ -f "${f}" ] || continue; case "${f}" in *.discarded) continue ;; esac; cmp -s "${f}" bunh/bundle/*/"${f##*/}" || exit 1; done
-test X"$(ls bunh/bundle | wc -l | tr -d ' ')" = X"1"
-#cmdfound.in carries none, and reads the cmdfound.d beside it
-grep -q '^BUNDLE_ID=""$' ../../cmdfound.in
-#and it carries no source ruled out: a name.discarded is a note for whoever adds a channel
-test X"$(ls bunh/bundle/*/ | grep -c '\.discarded$')" = X"0"
 #@section{coverage}
 #a source a channel already covers is named on that channel's #covers: line, and
-#one no channel covers but that was ruled out has a name.discarded saying why, never
+#one no channel covers but that was ruled out has a note in cmdfound.d/discarded/ saying why, never
 #run. Neither is a channel, and nothing is both
-covered=""; for f in ../../cmdfound.d/*; do case "${f}" in *.discarded) continue ;; esac; [ -f "${f}" ] || continue; covered="${covered} $(sed -n 's/^#covers: \(.*\) - .*/\1/p' "${f}" | tr ',\n' '  ')"; done
+covered=""; for f in ../../cmdfound.d/* ../../cmdfound.d/*.d/*.d/*; do [ -f "${f}" ] || continue; covered="${covered} $(sed -n 's/^#covers: \(.*\) - .*/\1/p' "${f}" | tr ',\n' '  ')"; done
 test -n "$(printf "%s" "${covered}" | tr -d ' ')"
-for n in ${covered}; do test ! -e "../../cmdfound.d/${n}" && test ! -e "../../cmdfound.d/${n}.discarded" || exit 1; done
-for f in ../../cmdfound.d/*.discarded; do test ! -e "${f%.discarded}" && test ! -x "${f}" && grep -q '^#why: .' "${f}" || exit 1; done
+for n in ${covered}; do test ! -e "../../cmdfound.d/${n}" && test X"$(ls ../../cmdfound.d/*.d/*.d/"${n}" 2>/dev/null)" = X"" && test ! -e "../../cmdfound.d/discarded/${n}" || exit 1; done
+for f in ../../cmdfound.d/discarded/*; do test ! -e "../../cmdfound.d/${f##*/}" && test X"$(ls ../../cmdfound.d/*.d/*.d/"${f##*/}" 2>/dev/null)" = X"" && test ! -x "${f}" && grep -q '^#why: .' "${f}" || exit 1; done
 #@section{home}
 #with no CMDFOUND_HOME the home is ~/.cmdfound: XDG_CACHE_HOME is not read, and
 #nothing goes under ~/.cache, which cache cleaners wipe
@@ -346,7 +427,7 @@ test X"$(cmdfound --yes right/twin 2>/dev/null)" = X"right"
 tw2h="$(pwd)/tw2"; tw2out="none was guessed"
 { ! script --version 2>/dev/null | grep util-linux >/dev/null; } || tw2out="$(CMDFOUND_HOME="${tw2h}" script -qec 'cmdfound --yes twin' /dev/null </dev/null 2>/dev/null | tr -d '\r')"
 test X"$(printf "%s\n" "${tw2out}" | grep -c 'none was guessed')" = X"1"
-test X"$(printf "%s\n" "${tw2out}" | grep -c 'which one')" = X"0"
+test X"$(printf "%s\n" "${tw2out}" | grep -c 'which package')" = X"0"
 #@section{crashed}
 #only 1 says "I do not have it". A probe that died said nothing, and reading
 #that as a no is how a channel that broke passes for one that works: the
@@ -449,7 +530,7 @@ test X"$(awk -F'\t' '$2 == "github:acme/dgx@1.0" {print $4}' dh/channels/github/
 PATH="${c404}:${PATH}" CMDFOUND_CHANNELS="${realch}" CMDFOUND_HOME="${dh2h}" cmdfound --yes github:acme/dgx >/dev/null 2>&1; test X"${?}" = X"127"
 test ! -d dh2/channels/github/by/acme/dgx
 #the channels are found next to the file itself, however it was reached
-ln -s "$(cd ../.. && pwd)/cmdfound" srl
+ln -s "$(cd ../.. && pwd)/cmdfound.in" srl
 PATH="${c404}:${PATH}" CMDFOUND_CHANNELS= CMDFOUND_HOME="${gdh}" ./srl -n github:acme/dg | grep 'github:acme/dg@1.0' >/dev/null
 #aqua installs what its registry names, and the resolver gets aqua first, the
 #way it gets anything else; the stand-in refuses a sum that does not match
@@ -537,6 +618,9 @@ test X"$(awk '$1 == "nodeps:hopname@1.0" {print $4, $5}' hop4out)" = X"<0.01 s"
 #first that has the name is taken and the rest paused, keeping what arrived
 cath="$(pwd)/cath"
 CMDFOUND_HOME="${cath}" cmdfound -n catname > catout 2> caterr
+#what each weighs is asked of all of them at once, and said: a distro's catalog
+#is many files, and weighing them one after another took half a minute in silence
+grep -x "cmdfound: asking catalogs" caterr >/dev/null
 grep -x "cmdfound: no local catalog has 'catname'; fetching the catalogs of fastindex (10 B) and slowindex (12 B)" caterr >/dev/null
 test X"$(tail -1 catout | awk '{print $2}')" = X"fastindex:catname@1.0"
 grep "fastindex has 'catname'; slowindex paused, to go on when needed" caterr >/dev/null
@@ -555,12 +639,56 @@ test X"$(grep -c 'needed once' catout)" = X"0"
 test X"$(awk '$1 == "fastindex:catname@1.0" {print $2}' catout)" = X"10"
 #and the path costs what the program costs and nothing of the catalog: a record
 #that makes fetching it slow does not move the time the path is shown with
+#a heavy catalog, a distro's of tens of MB, goes only once the light ones had
+#nothing: catname is fastindex's and heavyindex is never fetched for it;
+#catheavy is only heavyindex's, which is fetched after fastindex said no
+mkdir -p hvch && ln -s "$(cd .. && pwd)/cmdfound.d/fastindex" hvch/fastindex && cp ../cmdfound.d/fake-heavyindex hvch/heavyindex && chmod 755 hvch/heavyindex
+CMDFOUND_CHANNELS="$(pwd)/hvch" CMDFOUND_HOME="$(pwd)/hvh" cmdfound -n catname > hvout 2> hverr
+test X"$(tail -1 hvout | awk '{print $2}')" = X"fastindex:catname@1.0"
+grep -x "cmdfound: no local catalog has 'catname'; fetching fastindex's catalog (10 B)" hverr >/dev/null
+grep -x "cmdfound: the full distro catalogs go last, only if these miss" hverr >/dev/null
+test ! -e hvh/channels/heavyindex/index
+CMDFOUND_CHANNELS="$(pwd)/hvch" CMDFOUND_HOME="$(pwd)/hvh2" cmdfound -n catheavy > hvout 2> hverr
+test X"$(tail -1 hvout | awk '{print $2}')" = X"heavyindex:catheavy@1.0"
+grep -x "cmdfound: no catalog yet has 'catheavy'; fetching heavyindex's catalog (8.6 MB)" hverr >/dev/null
+#a catalog here that could not tell is said before the others are fetched,
+#and what is fetched for it says it is the ones that could be asked
+mkdir -p hvuch && ln -s "$(cd .. && pwd)/cmdfound.d/fastindex" hvuch/fastindex && cp ../cmdfound.d/fake-heavyindex hvuch/heavyindex && chmod 755 hvuch/heavyindex
+printf '%s\n' '#!/bin/sh' 'case "${1}" in meta) printf "%s\n" "kind=artifact" "confines=no" "describes=self" ;; probe) printf "%s\n" "unreachable=its api limit is used up"; exit 2 ;; *) exit 1 ;; esac' > hvuch/downcat && chmod 755 hvuch/downcat
+CMDFOUND_CHANNELS="$(pwd)/hvuch" CMDFOUND_HOME="$(pwd)/hvuh" cmdfound -n catheavy > hvout 2> hverr
+test X"$(tail -1 hvout | awk '{print $2}')" = X"heavyindex:catheavy@1.0"
+grep -x "cmdfound: downcat could not be asked for 'catheavy': its api limit is used up" hverr >/dev/null
+grep -x "cmdfound: no local catalog that could be asked has 'catheavy'; fetching fastindex's catalog (10 B)" hverr >/dev/null
+#once a light catalog that confines has the name, only a native route is
+#still worth a catalog: a heavy one that confines as well is not fetched
+mkdir -p hvcch && sed 's/confines=no/confines=yes/' ../cmdfound.d/fastindex > hvcch/boxindex && sed 's/confines=no/confines=yes/' ../cmdfound.d/fake-heavyindex > hvcch/heavybox && chmod 755 hvcch/boxindex hvcch/heavybox
+CMDFOUND_CHANNELS="$(pwd)/hvcch" CMDFOUND_HOME="$(pwd)/hvch3" cmdfound -n catname > hvout 2> hverr
+test X"$(tail -1 hvout | awk '{print $2}')" = X"boxindex:catname@1.0"
+test -e hvch3/channels/boxindex/index && test ! -e hvch3/channels/heavybox/index
+grep -x "cmdfound: the full distro catalogs go last, only if these miss" hverr >/dev/null
+test X"$(grep -c heavybox hverr)" = X"0"
 cath2="$(pwd)/cath2"; mkdir -p cath2/channels/fastindex cath2ch && ln -s "$(cd .. && pwd)/cmdfound.d/fastindex" cath2ch/fastindex && printf 'catalog\t100\t60000\n' > cath2/channels/fastindex/timings
 test X"$(CMDFOUND_CHANNELS="$(pwd)/cath2ch" CMDFOUND_HOME="${cath2}" cmdfound -n catname 2>/dev/null | awk '$1 == "fastindex:catname@1.0" {print $4, $5}')" = X"<0.01 s"
 #and the paused one goes on from where it stopped instead of starting over
 CMDFOUND_HOME="${cath}" cmdfound -n catother > catout 2> caterr
 test X"$(tail -1 catout | awk '{print $2}')" = X"slowindex:catother@1.0"
 grep -E '^resumed from [1-9]' cath/channels/slowindex/index/log >/dev/null
+#a catalog that has arrived when another wins is not stopped: what is left is
+#reading it, which a stop would only throw away, so it goes on behind and is
+#there the next time, and the run does not wait for it
+mkdir -p rdch && ln -s "$(cd .. && pwd)/cmdfound.d/fastindex" rdch/fastindex && cp ../cmdfound.d/fake-readingindex rdch/readingindex && chmod 755 rdch/readingindex
+rdh="$(pwd)/rdh"
+CMDFOUND_CHANNELS="$(pwd)/rdch" CMDFOUND_HOME="${rdh}" cmdfound -n catname > rdout 2> rderr
+test X"$(tail -1 rdout | awk '{print $2}')" = X"fastindex:catname@1.0"
+grep -x "cmdfound: fastindex has 'catname'; readingindex arrived, the reading goes on in the background" rderr >/dev/null
+test ! -e rdh/channels/readingindex/index/names
+i=0; while [ ! -f rdh/channels/readingindex/index/names ] && [ "${i}" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+test -f rdh/channels/readingindex/index/names
+#while a catalog is still coming, it is said every CMDFOUND_HEARTBEAT seconds,
+#ten by default, so a long fetch is never a silence
+CMDFOUND_HEARTBEAT=1 CMDFOUND_CHANNELS="$(pwd)/rdch" CMDFOUND_HOME="$(pwd)/rdh2" cmdfound -n catread > rdout 2> rderr
+test X"$(tail -1 rdout | awk '{print $2}')" = X"readingindex:catread@1.0"
+grep -x "cmdfound: still waiting for readingindex's catalog (14 B), 1 s so far" rderr >/dev/null
 #what fetching a catalog took is kept in the channel that fetched it
 test X"$(awk -F'\t' '$1 == "catalog"' cath/channels/fastindex/timings | awk 'END {print NR}')" = X"1"
 #a catalog that confines is not the answer for arriving first: plainindex, native
@@ -612,6 +740,16 @@ CMDFOUND_HOME="$(pwd)/selfh" cmdfound --yes selfishprog > /dev/null 2> neederr; 
 grep "selfish: srneed-selfish could not be had" neederr >/dev/null
 #a native catalog waiting on a program gets its turn before an answer that confines
 test X"$(CMDFOUND_HOME="$(pwd)/classneedh" cmdfound --yes needyclass 2>/dev/null)" = X"needy ran"
+#and before the heavy catalogs: a program and the catalog it reads cost less
+#than a distro's tens of MB, which are fetched only when none of these had it
+#fastindex and heavyindex are copied in answering needy* too, so both race
+mkdir -p tierch && for c in needy lender; do ln -s "$(cd .. && pwd)/cmdfound.d/${c}" "tierch/${c}"; done && sed 's/case "${2}" in cat\*)/case "${2}" in cat*|needy*)/' ../cmdfound.d/fastindex > tierch/fastindex && sed 's/case "${2}" in cat\*)/case "${2}" in cat*|needy*)/' ../cmdfound.d/fake-heavyindex > tierch/heavyindex && chmod 755 tierch/fastindex tierch/heavyindex
+test X"$(CMDFOUND_CHANNELS="$(pwd)/tierch" CMDFOUND_HOME="$(pwd)/tierh" cmdfound --yes needyprog 2>tiererr)" = X"needy ran"
+grep -x "cmdfound: no local catalog has 'needyprog'; fetching fastindex's catalog (10 B)" tiererr >/dev/null
+grep -x "cmdfound: needy comes after, its catalog needs a program not here yet" tiererr >/dev/null
+grep -x "cmdfound: the full distro catalogs go last, only if these miss" tiererr >/dev/null
+grep -x "cmdfound: no catalog yet has 'needyprog'; fetching needy's catalog (20 B)" tiererr >/dev/null
+test ! -e tierh/channels/heavyindex/index
 #a dry run gets it no program, so the answer that confines is taken
 CMDFOUND_HOME="$(pwd)/classneeddry" cmdfound -n needyclass > classout 2> classerr
 test X"$(tail -1 classout | awk '{print $2}')" = X"boxcat:needyclass@1.0"
@@ -643,7 +781,7 @@ nottyh="$(pwd)/notty"
 nottyout=""
 { ! command -v setsid >/dev/null 2>&1; } || nottyout="$(CMDFOUND_HOME="${nottyh}" setsid cmdfound tiny 2>&1 </dev/null)" || :
 { ! command -v setsid >/dev/null 2>&1; } || test X"$(printf "%s\n" "${nottyout}" | grep -c 'no terminal to ask on')" = X"1"
-{ ! command -v setsid >/dev/null 2>&1; } || test X"$(printf "%s\n" "${nottyout}" | grep -c 'dev/tty')" = X"0"
+{ ! setsid -w true >/dev/null 2>&1; } || test X"$(printf "%s\n" "${nottyout}" | grep -c 'dev/tty')" = X"0"
 #a package with several programs runs the one that was typed
 { printf '%s\n' 'packages:' '  - type: github_release' '    repo_owner: acme' '    repo_name: multi' '    files:' '      - name: one' '      - name: two'; cat filler.yaml; } > regm.yaml
 CMDFOUND_HOME="$(pwd)/aqm" CMDFOUND_AQUA_REGISTRY="$(pwd)/regm.yaml" cmdfound --channel ../../cmdfound.d/aqua index >/dev/null
@@ -767,8 +905,8 @@ pxb="$(pwd)/pxb"; regf="$(pwd)/reg.yaml"; c403="$(pwd)/c403"
 mkdir -p pxb/channels/github/cache && cp pxh/channels/github/cache/pkgxdev_pkgx_.json pxb/channels/github/cache/
 PATH="${c404}:${PATH}" CMDFOUND_CHANNELS="${realch}" CMDFOUND_HOME="${pxb}" CMDFOUND_AQUA_REGISTRY="${regf}" CMDFOUND_PKGX_DIST="${pxdist}" FAKE_PKGX_GRAPH="extra.org=1.0.0" cmdfound --yes extra > pxout 2> pxerr
 test X"$(cat pxout)" = X"extra ran"
-#nix-portable's catalog is read with sqlite3, and alpine's from the mirror above
-grep -E "^cmdfound: no local catalog has 'extra'; fetching the catalogs of alpine \([0-9.]+ [KM]?B\), am \([0-9.]+ [KM]?B\), aqua \([0-9.]+ [KM]?B\), nix-portable and pkgx \([0-9.]+ [KM]?B\)$" pxerr >/dev/null
+#nix-portable's catalog is read with sqlite3, and the distributions' from the mirrors above
+grep -E "^cmdfound: no local catalog has 'extra'; fetching the catalogs of alpine \([0-9.]+ [KM]?B\), alt \([0-9.]+ [KM]?B\), am \([0-9.]+ [KM]?B\), aqua \([0-9.]+ [KM]?B\), arch \([0-9.]+ [KM]?B\), blackarch \([0-9.]+ [KM]?B\), chaotic-aur \([0-9.]+ [KM]?B\), epel \([0-9.]+ [KM]?B\), fedora \([0-9.]+ [KM]?B\), nix-portable, opensuse \([0-9.]+ [KM]?B\), pkgx \([0-9.]+ [KM]?B\), rosa \([0-9.]+ [KM]?B\), ubuntu \([0-9.]+ [KM]?B\) and wolfi \([0-9.]+ [KM]?B\)$" pxerr >/dev/null
 grep 'pkgx: 1[0-9][0-9] packages' pxerr >/dev/null
 #and once one channel has the name, the catalogs after it are left for later
 pxb2="$(pwd)/pxb2"; mkdir -p pxb2/channels/github/cache && cp am/channels/github/cache/aquaproj_aqua_.json am/channels/github/cache/acme_jqx_.json pxb2/channels/github/cache/
@@ -828,13 +966,25 @@ test X"$(awk 'END {print NR}' amh/channels/am/index/apps.tsv)" = X"112"
 test X"$(CMDFOUND_HOME="${amh}" cmdfound --channel ../../cmdfound.d/am probe amtool | tr '\n' ' ')" = X"version=latest requires=am:APP-MANAGER "
 test X"$(CMDFOUND_HOME="${amh}" cmdfound --channel ../../cmdfound.d/am probe APP-MANAGER | tr '\n' ' ')" = X"version=9.9-1 bytes=$(wc -c < ../cmdfound.d/fake-appman | awk '{print $1}') "
 CMDFOUND_HOME="${amh}" cmdfound --channel ../../cmdfound.d/am probe nosuchapp >/dev/null 2>&1; test X"${?}" = X"1"
-PATH="${c404}:${PATH}" CMDFOUND_CHANNELS="${realch}" CMDFOUND_HOME="${amh}" CMDFOUND_LIBFUSE2=no FAKE_AM_LOG="${amlog}" cmdfound --yes amtool > amout 2> amerr
+#a script that takes an AppImage from github releases, as most of AM's x86_64
+#ones do, gives a size: the first AppImage of the latest release that names no
+#other cpu, read from github's pages and not its api, kept a day
+amsh="$(pwd)/amsh"; mkdir -p amrepo/programs/x86_64 amweb amwebroot/github.com/acme/amtool/releases/expanded_assets && cp ../cmdfound.d/fake-web amweb/curl && chmod 755 amweb/curl
+printf '%s\n' 'version=$(curl -Ls https://api.github.com/repos/acme/amtool/releases | grep -i appimage | head -1)' > amrepo/programs/x86_64/amtool
+printf '%s\n' 'https://github.com/acme/amtool/releases/tag/v1' > amwebroot/github.com/acme/amtool/releases/latest.302
+printf '%s\n' '<li><a href="/acme/amtool/releases/download/v1/amtool-aarch64.AppImage">a</a><span>5 KB</span></li>' '<li><a href="/acme/amtool/releases/download/v1/amtool-x86_64.AppImage">b</a>' '<span>4.5 MB</span></li>' > amwebroot/github.com/acme/amtool/releases/expanded_assets/v1
+CMDFOUND_HOME="${amsh}" cmdfound --channel ../../cmdfound.d/am index >/dev/null
+{ [ X"$(uname -m)" != X"x86_64" ]; } || test X"$(PATH="$(pwd)/amweb:${PATH}" FAKE_WEB_ROOT="$(pwd)/amwebroot" CMDFOUND_HOME="${amsh}" cmdfound --channel ../../cmdfound.d/am probe amtool | tr '\n' ' ')" = X"version=latest requires=am:APP-MANAGER bytes=4718592 estimate=yes "
+{ [ X"$(uname -m)" != X"x86_64" ]; } || test X"$(PATH="${c404}:${PATH}" CMDFOUND_HOME="${amsh}" cmdfound --channel ../../cmdfound.d/am probe amtool | grep '^bytes=')" = X"bytes=4718592"
+rm -f amrepo/programs/x86_64/amtool
+PATH="${c404}:${PATH}" CMDFOUND_CHANNELS="${realch}" CMDFOUND_HOME="${amh}" CMDFOUND_LIBFUSE2=no FAKE_AM_LOG="${amlog}" FAKE_AM_APPIMAGE=amtool cmdfound --yes amtool > amout 2> amerr
 test X"$(cat amout)" = X"amtool ran"
 grep 'amtool latest -> am:amtool  size unknown, time unknown  \[via am\]  native' amerr >/dev/null
 grep 'first tool am:APP-MANAGER 9.9-1' amerr >/dev/null
 grep "total at least $(awk -v b="$(wc -c < ../cmdfound.d/fake-appman)" 'BEGIN {printf("%.1f KB", b / 1024)}'), time unknown" amerr >/dev/null
 test X"$(readlink amh/channels/am/tool/current)" = X"${amh}/channels/am/tool/9.9-1/appman"
 #AM ran with the channel's HOME, and without libfuse2 it was asked to convert
+#the AppImage it installed
 test X"$(tr '\n' ' ' < amlog)" = X"install amtool HOME=${amh}/channels/am/home nolibfuse amtool "
 test -L amh/channels/am/run/amtool/amtool
 test X"$(LC_ALL=C sort amh/channels/am/members/amtool/latest | tr '\n' ' ')" = X"apps/amtool bin/amtool share/applications/amtool-AM.desktop "
@@ -847,6 +997,11 @@ test X"$(cat amout)" = X"amother ran"
 grep -E 'amother latest -> am:amother  size unknown, (<0\.01 s|~[0-9.]+ s)  \[via am\]' amerr >/dev/null
 test X"$(awk -F'\t' '$1 == "install" && $2 == "-"' amh/channels/am/timings | awk 'END {print NR}')" = X"2"
 test X"$(grep -c 'nolibfuse amother' amlog)" = X"0"
+#a program that is not an AppImage, a static binary of AM's catalog, is not
+#asked to convert either, with or without libfuse2: AM would refuse it aloud
+PATH="${c404}:${PATH}" CMDFOUND_CHANNELS="${realch}" CMDFOUND_HOME="${amh}" CMDFOUND_LIBFUSE2=no FAKE_AM_LOG="${amlog}" cmdfound --yes amfill0 > amout 2> amerr
+test X"$(cat amout)" = X"amfill0 ran"
+test X"$(grep -c 'nolibfuse amfill0' amlog)" = X"0"
 #purging a program takes what AM's remove script names, files and links too
 CMDFOUND_CHANNELS="${realch}" CMDFOUND_HOME="${amh}" cmdfound --purge amtool >/dev/null 2>&1
 test ! -e amh/channels/am/apps/amtool
@@ -1065,6 +1220,8 @@ mkdir -p "nixch/${nprel}" npchan && ln -s "${realch}/nix-portable" npchan/nix-po
 { printf '%s\n' 'fake programs.sqlite'; printf "%s\t${npsys}\t%s\n" figlet figlet chkfont figlet htop htop htop htop-vim jq jq npunc npunc npfill1 npfill1 nplink nplink npbindir npbindir npghost npghost 'Surge XT' surge-xt 'who@' ucspi-tcp; printf '%s\taarch64-darwin\t%s\n' macname macpkg; i=0; while [ ${i} -lt 110 ]; do printf "npfill%s\t${npsys}\tnpfill%s\n" ${i} ${i}; i=$((i+1)); done; } > "nixch/${nprel}/programs.sqlite"
 printf '%s\t%s\t%s\n' figlet out 'figlet chkfont' htop out htop htop-vim out htop jq man '' jq bin jq npunc out npunc npfill1 out npfill1 nplink out nplink@lib npbindir out npbindir@binlink npghost out npother > "nixch/${nprel}/fake-packages.tsv"
 : > "nixch/${nprel}/default.nix" && (cd nixch && tar -cJf nixexprs.tar.xz "${nprel}") && cp ../cmdfound.d/fake-nix-portable "nixch/${npasset}"
+#the release's store paths: jq's own, one of its outputs and a longer name that begins as it does
+printf '/nix/store/%s-%s\n' 00000000000000000000000000000000 jq-1.7.1-man 11111111111111111111111111111111 jqp-1.0 22222222222222222222222222222222 jq-1.7.1 33333333333333333333333333333333 npfill1-1.0 | xz > nixch/store-paths.xz
 nph="$(pwd)/nph"; npch="$(pwd)/npchan"; nplog="$(pwd)/nplog"; sqlog="$(pwd)/sqlog"
 mkdir -p nph/channels/github/cache && printf '{"tag_name":"v012","assets":[{"name":"%s","size":68062412,"browser_download_url":"%s","digest":null}]}' "${npasset}" "$(pwd)/nixch/${npasset}" > nph/channels/github/cache/DavHau_nix-portable_.json
 #with no local catalog, probe says what it needs instead of no
@@ -1078,9 +1235,9 @@ test X"$(grep -c "/${nprel}/programs.sqlite\$" sqlog)" = X"1"
 #a ~/.sqliterc of the user's, with .mode box, is not what the catalog is read with
 mkdir -p sqhome nph6/channels/nix-portable/needs && printf '%s\n' '.mode box' > sqhome/.sqliterc && cp ../cmdfound.d/fake-sqlite3 nph6/channels/nix-portable/needs/sqlite3 && chmod 755 nph6/channels/nix-portable/needs/sqlite3
 test X"$(PATH="$(pwd)/nph6/channels/nix-portable/needs:${PATH}" HOME="$(pwd)/sqhome" CMDFOUND_HOME="$(pwd)/nph6" cmdfound --channel ../../cmdfound.d/nix-portable index 2>&1 | grep '^names=')" = X"names=118"
-#probe answers with the release, the only version there is, and with no size:
-#nix cannot say without evaluating nixpkgs, and what a first program downloads
-#besides itself is not guessed at either, with a git here or without one
+#probe answers with the release, the only version there is, and with no size
+#while nix-portable is not here to ask: what a first program downloads besides
+#itself is not guessed at, with a git here or without one
 test X"$(CMDFOUND_HOME="${nph}" cmdfound --channel ../../cmdfound.d/nix-portable probe figlet | tr '\n' ' ')" = X"version=${nprel} package=nixpkgs.figlet requires=github:DavHau/nix-portable "
 mkdir -p nogitbin && ln -s "$(command -v awk)" nogitbin/awk && ln -s "$(command -v cat)" nogitbin/cat && ln -s "$(pwd)/hostbin/uname" nogitbin/uname
 test X"$(PATH="$(pwd)/nogitbin" CMDFOUND_HOME="${nph}" cmdfound --channel ../../cmdfound.d/nix-portable probe figlet | grep -c '^bytes=\|^estimate=')" = X"0"
@@ -1110,7 +1267,14 @@ grep "figlet ${nprel} -> nix-portable:nixpkgs.figlet  size unknown, time unknown
 grep 'first tool github:DavHau/nix-portable v012, 64.9 MB' nperr >/dev/null
 grep 'total at least 64.9 MB, time unknown' nperr >/dev/null
 test X"$(grep -c 'catalog nix-portable' nperr)" = X"0"
-#and once one is installed, nothing is known of the next one's size either
+#once nix-portable is here, a probe says what installing downloads: nix is
+#asked by the store path the release's store-paths names, the package's own and
+#not an output of it nor a longer name, and the answer is kept for the release
+test X"$(CMDFOUND_HOME="${nph}" FAKE_NIX_DRY=2.00 cmdfound --channel ../../cmdfound.d/nix-portable probe jq | tr '\n' ' ')" = X"version=${nprel} package=nixpkgs.jq requires=github:DavHau/nix-portable bytes=2097152 "
+test X"$(CMDFOUND_HOME="${nph}" FAKE_NIX_DRY=9.00 cmdfound --channel ../../cmdfound.d/nix-portable probe jq | grep '^bytes=\|^estimate=' | tr '\n' ' ')" = X"bytes=2097152 estimate=yes "
+test X"$(awk '{print $1}' nph/channels/nix-portable/cache/download/jq)" = X"${nprel}"
+#one nix would build has no size, and neither has one store-paths lacks
+test X"$(CMDFOUND_HOME="${nph}" FAKE_NIX_DRY=built cmdfound --channel ../../cmdfound.d/nix-portable probe npfill1 | grep -c '^bytes=')" = X"0"
 test X"$(CMDFOUND_HOME="${nph}" cmdfound --channel ../../cmdfound.d/nix-portable probe chkfont | grep -c '^bytes=')" = X"0"
 #a first program through this channel is where the most is downloaded and the
 #least known, so what can be learnt is on the question, a line each: they are
@@ -1171,9 +1335,10 @@ test X"$(grep -E '^nix (eval|build) ' nplog nplogunc | grep -c -- 'require-sigs 
 #directory that is itself a link: both lead nowhere outside the store
 test X"$(CMDFOUND_CHANNELS="${npch}" CMDFOUND_HOME="${nph}" cmdfound --yes nplink 2>/dev/null)" = X"nplink ran in bwrap, HOME=${HOME}"
 test X"$(CMDFOUND_CHANNELS="${npch}" CMDFOUND_HOME="${nph}" cmdfound --yes npbindir 2>/dev/null)" = X"npbindir ran in bwrap, HOME=${HOME}"
-#a name two packages provide is not guessed, and both are named in full
-CMDFOUND_CHANNELS="${npch}" CMDFOUND_HOME="${nph}" cmdfound --yes htop > /dev/null 2> nperr; test X"${?}" = X"127"
-test X"$(grep -cE '^    nix-portable:nixpkgs\.htop(-vim)?$' nperr)" = X"2"
+#a name two packages provide, with nobody to ask, is the one named so
+CMDFOUND_CHANNELS="${npch}" CMDFOUND_HOME="${nph}" cmdfound -n --yes htop > npout 2> nperr
+test X"$(tail -1 npout | awk '{print $2}' | sed 's/@.*//')" = X"nix-portable:nixpkgs.htop"
+test X"$(grep -c 'more than one package' nperr)" = X"0"
 #where bwrap makes no namespace the launcher goes through nix-portable's proot
 printf '%s\n' 'another boot' > nph/channels/nix-portable/run/.bwrap
 test X"$(CMDFOUND_CHANNELS="${npch}" CMDFOUND_HOME="${nph}" FAKE_BWRAP_BROKEN=1 FAKE_PROOT_LOG="$(pwd)/pplog" cmdfound --yes npfill1 2>/dev/null)" = X"npfill1 ran in proot, HOME=${HOME}"
@@ -1534,6 +1699,29 @@ printf '%s\n' '#!/bin/sh' 'case "${1}" in probe) [ X"${2}" = X"fcname" ] || exit
 CMDFOUND_CHANNELS="${fcdupd}" CMDFOUND_HOME="${fch}" cmdfound --yes fcname > /dev/null 2> fcerr; test X"${?}" = X"127"
 test X"$(grep -cx '    fakecat:fcname' fcerr)" = X"1"
 test X"$(grep -c 'box:' fcerr)" = X"0"
+#one package in many channels is one program: nothing is asked, and its best
+#place is taken, a nix set's spelling of it being the same package
+mkdir -p fcone fcpair && for d in fcone fcpair; do for c in fakecat fastbox slowbox; do ln -s "${srd}/${c}" "${d}/${c}"; done; done
+printf '%s\n' '#!/bin/sh' 'case "${1}" in probe) case "${2}" in fcname) printf "%s\n" "candidate=nixpkgs.fcname" "candidate=nixpkgs.python313Packages.fcname"; exit 3 ;; nixpkgs.fcname) printf "%s\n" "version=3.0" "bytes=10" ;; *) exit 1 ;; esac ;; *) exit 1 ;; esac' > fcone/fcnix && chmod 755 fcone/fcnix
+CMDFOUND_CHANNELS="$(pwd)/fcone" CMDFOUND_HOME="${fch}" cmdfound -n fcname > fcout 2> fcerr </dev/null
+test X"$(tail -1 fcout | awk '{print $2}')" = X"fcnix:nixpkgs.fcname@3.0"
+test X"$(grep -c 'more than one program' fcerr)" = X"0"
+#and of programs that differ, the one named as asked is taken, with a terminal
+#as without and without a word: the menu is for when no package is named so
+printf '%s\n' '#!/bin/sh' 'case "${1}" in probe) case "${2}" in fcname) printf "%s\n" "candidate=a/fcname" "candidate=b/fcname-extra"; exit 3 ;; a/fcname) printf "%s\n" "version=3.0" "bytes=10" ;; *) exit 1 ;; esac ;; *) exit 1 ;; esac' > fcpair/fcpick && chmod 755 fcpair/fcpick
+CMDFOUND_CHANNELS="$(pwd)/fcpair" CMDFOUND_HOME="${fch}" cmdfound -n fcname > fcout 2> fcerr </dev/null
+test X"$(tail -1 fcout | awk '{print $2}')" = X"fcpick:a/fcname@3.0"
+test X"$(grep -c 'more than one package' fcerr)" = X"0"
+{ ! script --version 2>/dev/null | grep util-linux >/dev/null; } || { printf '9\n' | CMDFOUND_CHANNELS="$(pwd)/fcpair" CMDFOUND_HOME="${fch}" script -qec 'cmdfound -n fcname' /dev/null > fcout 2>/dev/null; test X"$(tr -d '\r' < fcout | grep -cE '^  [0-9]\)')" = X"0" && test X"$(tr -d '\r' < fcout | tail -1 | awk '{print $2}')" = X"fcpick:a/fcname@3.0"; }
+#with none named so, the menu shows each package with what its catalog says it
+#is, when it says more than the programs it provides; with nobody to ask, the
+#same list, and nothing is guessed
+mkdir -p fcdesc && for c in fakecat fastbox slowbox; do ln -s "${srd}/${c}" "fcdesc/${c}"; done
+printf '%s\n' '#!/bin/sh' 'case "${1}" in probe) case "${2}" in fcthing) printf "%s\n" "candidate=a/x" "candidate=b/y"; exit 3 ;; a/x|b/y) printf "%s\n" "version=1.0" "bytes=10" ;; *) exit 1 ;; esac ;; search) case "${2}" in x) printf "fcsay:a/x\tfcthing\tA thing that does x\n" ;; y) printf "fcsay:b/y\tfcthing\tprovides fcthing\n" ;; esac ;; *) exit 1 ;; esac' > fcdesc/fcsay && chmod 755 fcdesc/fcsay
+CMDFOUND_CHANNELS="$(pwd)/fcdesc" CMDFOUND_HOME="${fch}" cmdfound -n fcthing > fcout 2> fcerr </dev/null; test X"${?}" = X"127"
+grep -x "cmdfound: 'fcthing' is a program in more than one package, and none was guessed:" fcerr >/dev/null
+test X"$(grep '^    fcsay:' fcerr | tr '\n' '|')" = X"    fcsay:a/x  - A thing that does x|    fcsay:b/y|"
+{ ! script --version 2>/dev/null | grep util-linux >/dev/null; } || test X"$(printf '9\n' | CMDFOUND_CHANNELS="$(pwd)/fcdesc" CMDFOUND_HOME="${fch}" script -qec 'cmdfound -n fcthing' /dev/null 2>/dev/null | tr -d '\r' | grep -E "^cmdfound: 'fcthing' is a program|^  [0-9]\)" | tr '\n' '|')" = X"cmdfound: 'fcthing' is a program in more than one package:|  1) fcsay:a/x  - A thing that does x|  2) fcsay:b/y|"
 #and a command of two packages of the catalog is asked about
 { ! script --version 2>/dev/null | grep util-linux >/dev/null; } || test X"$(printf '1\n' | CMDFOUND_HOME="${fch}" script -qec 'cmdfound -n fcamb' /dev/null 2>/dev/null | tr -d '\r' | tail -1 | awk '{print $2}')" = X"fastbox:fakecat/fcamb-left@1.0-r0"
 #a runtime that cannot be asked hides a way to run the program, not the
@@ -1587,6 +1775,15 @@ mkdir -p fco/channels/slowbox && printf 'install\t1000\t60000\n' > fco/channels/
 CMDFOUND_CHANNELS="${fcoch}" CMDFOUND_HOME="${fco}" cmdfound --yes slowbox:fakecat/fcname > fcoout 2> fcoerr
 test X"$(cat fcoout)" = X"fcname ran in slowbox"
 test X"$(grep -e ' -> ' -e '^            ' fcoerr | tr '\n' '|')" = X"cmdfound: fcname 1.0-r0 -> slowbox:fakecat/fcname  about 4.9 KB, ~5 min  [via fakecat]  dockerized|"
+#a runtime that cannot install a catalog's package hands it to another runtime
+#once, saying so; a runtime named is the only one tried
+CMDFOUND_CHANNELS="${fcoch}" CMDFOUND_HOME="$(pwd)/fcf" FAKE_BOX_FAIL=fastbox cmdfound --yes fcname > fcoout 2> fcoerr
+test X"$(cat fcoout)" = X"fcname ran in slowbox"
+grep -x 'cmdfound: fastbox could not install it; slowbox:fakecat/fcname@1.0-r0 is tried instead' fcoerr >/dev/null
+CMDFOUND_CHANNELS="${fcoch}" CMDFOUND_HOME="$(pwd)/fcf2" FAKE_BOX_FAIL=fastbox cmdfound --yes fastbox:fakecat/fcname > fcoout 2> fcoerr; test X"${?}" = X"127"
+test X"$(grep -c 'tried instead' fcoerr)" = X"0"
+CMDFOUND_CHANNELS="${fcoch}" CMDFOUND_HOME="$(pwd)/fcf3" FAKE_BOX_FAIL="fastbox slowbox" cmdfound --yes fcname > fcoout 2> fcoerr; test X"${?}" = X"127"
+test X"$(grep -c 'tried instead' fcoerr)" = X"1"
 test X"$(tr '\t\n' ': ' < fco/channels/slowbox/timings)" = X"install:1000:60000 install:5000:17 run:-:19 "
 #a catalog that announced no size tells the runtime none, not one the user exported
 FAKE_CAT_SIZELESS=1 CMDFOUND_BYTES=999 FAKE_BOX_LOG="${fcolog}" CMDFOUND_CHANNELS="${fcoch}" CMDFOUND_HOME="$(pwd)/fco2" cmdfound --yes fastbox:fakecat/fcname > fcoout 2> fcoerr
@@ -1758,7 +1955,7 @@ test ! -e "${sps}/by" && test ! -e "${sps}/store"
 #a whole purge, once agreed to and before the directory goes, asks each channel
 #whose tool keeps a store of its own to give all of it back
 rm -f lplog
-{ ! command -v setsid >/dev/null 2>&1; } || { FAKE_RECLAIMER_LOG="${lplog}" CMDFOUND_CHANNELS="${lpch}" CMDFOUND_HOME="${lph}" setsid cmdfound --purge > /dev/null 2>&1 < /dev/null; test X"${?}" = X"1"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { FAKE_RECLAIMER_LOG="${lplog}" CMDFOUND_CHANNELS="${lpch}" CMDFOUND_HOME="${lph}" setsid cmdfound --purge > /dev/null 2>&1 < /dev/null; test X"${?}" = X"1"; }
 test ! -e lplog && test -d lph/channels
 FAKE_BOX_LOG="${lplog}" FAKE_RECLAIMER_LOG="${lplog}" CMDFOUND_CHANNELS="${lpch}" CMDFOUND_HOME="${lph}" cmdfound --yes --purge > /dev/null 2>&1
 test X"$(cat lplog)" = X"reclaim all path=${lph}/channels/reclaimer/needs here"
@@ -1792,7 +1989,7 @@ rm -rf "${ephtmp}/cmdfound-eph.$$.live"
 #alpine, a catalog: Alpine 3.22's packages, answered from its APKINDEX. It
 #installs and runs nothing, so it is asked here through its verbs; uname is a
 #stand-in so the answers do not depend on this machine
-apch="${realch}/alpine"; aph="$(pwd)/aph"; apbin="$(pwd)/apbin"; apcurl="$(pwd)/apcurl"; apd="sha256:$(sha256sum apreg/v2/library/alpine/manifests/3.22 | awk '{print $1}')"
+apch="${realch}/distro.d/apk.d/alpine"; aph="$(pwd)/aph"; apbin="$(pwd)/apbin"; apcurl="$(pwd)/apcurl"; apd="sha256:$(sha256sum apreg/v2/library/alpine/manifests/3.22 | awk '{print $1}')"
 mkdir -p apbin apcurl && printf '%s\n' '#!/bin/sh' '[ X"${1}" = X"-m" ] && { printf "%s\n" "${FAKE_UNAME_M:-x86_64}"; exit 0; }' 'printf "%s\n" "Linux"' > apbin/uname && chmod 755 apbin/uname
 test X"$(cmdfound --channel "${apch}" meta | tr '\n' ' ')" = X"kind=catalog confines=yes describes=environment "
 #with no local catalog yet, it says so, in the word a user reads elsewhere
@@ -1800,7 +1997,7 @@ PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${apch}" prob
 grep -x 'needs=index' apout >/dev/null
 grep -x 'unreachable=there is no local catalog yet, run: cmdfound --index-update' apout >/dev/null
 #the catalog is main and community, both counted; a command is a name
-test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${apch}" index | tr '\n' ' ')" = X"packages=142 names=130 bytes=$(cat apfix/main/APKINDEX.tar.gz apfix/community/APKINDEX.tar.gz | wc -c | awk '{print $1}') "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${apch}" index | tr '\n' ' ')" = X"arrived=yes packages=142 names=130 bytes=$(cat apfix/main/APKINDEX.tar.gz apfix/community/APKINDEX.tar.gz | wc -c | awk '{print $1}') "
 #asked for its bytes it weighs both APKINDEX files with a HEAD and fetches
 #nothing; with one of them missing there is no half answer, and no answer
 test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/apw" cmdfound --channel "${apch}" index bytes)" = X"bytes=$(cat apfix/main/APKINDEX.tar.gz apfix/community/APKINDEX.tar.gz | wc -c | awk '{print $1}')"
@@ -1826,7 +2023,8 @@ test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${ap
 #the image's own packages are those of its /etc/apk/world and all they pull in,
 #so setup-alpine costs its package alone
 test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${apch}" probe setup-alpine | awk -F= '$1 == "package" || $1 == "bytes" {printf("%s ", $2)}')" = X"40000 alpine-conf "
-test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${apch}" probe oniguruma 6.9.10-r0 | awk -F= '$1 == "package" || $1 == "bytes" {printf("%s ", $2)}')" = X"200000 oniguruma "
+#a package with no command is no answer: nothing of it runs
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${apch}" probe oniguruma 6.9.10-r0 >/dev/null; test X"${?}" = X"1"
 #a version, a name or an architecture that is not there is a no
 PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${apch}" probe jq 1.7.1-r0 >/dev/null; test X"${?}" = X"1"
 PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${apch}" probe nobody-gives-this >/dev/null; test X"${?}" = X"1"
@@ -1855,7 +2053,7 @@ test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${ap
 test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" cmdfound --channel "${apch}" recipe R 4.5.1-r0 Rscript | awk '/^install=/ {sub(/.* /, ""); print; next} /^bin=/' | tr '\n' ' ')" = X"R=4.5.1-r0 bin=Rscript "
 PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" CMDFOUND_ALPINE_MIRROR='https://mirror.invalid/a b' cmdfound --channel "${apch}" recipe figlet 2.2.5-r3 figlet >/dev/null; test X"${?}" = X"1"
 #tar and gzip take nothing from the environment: one flag would leave it empty
-test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/aptar" TAR_OPTIONS=--exclude=APKINDEX GZIP=-l cmdfound --channel "${apch}" index | head -1)" = X"packages=142"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/aptar" TAR_OPTIONS=--exclude=APKINDEX GZIP=-l cmdfound --channel "${apch}" index | grep '^packages=')" = X"packages=142"
 #an index that comes out nearly empty is not swapped in
 mkdir -p apsmall/v3.22/main/x86_64 apsmall/v3.22/community/x86_64 && cp apfix/main/APKINDEX.tar.gz apsmall/v3.22/main/x86_64/ && cp apfix/small/APKINDEX.tar.gz apsmall/v3.22/community/x86_64/
 PATH="${apbin}:${PATH}" CMDFOUND_HOME="${aph}" CMDFOUND_ALPINE_MIRROR="$(pwd)/apsmall" cmdfound --channel "${apch}" index > apout; test X"${?}" = X"2"
@@ -1879,21 +2077,281 @@ test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/apnet" CMDFOUND_ALPINE_RE
 #asked. A stand-in curl serves the mirror and cannot reach any registry
 cp ../cmdfound.d/fake-curl apcurl/fake-curl && printf '%s\n' '#!/bin/sh' "for a in \"\${@}\"; do last=\"\${a}\"; done; printf '%s %s\\n' \"\${1}\" \"\${last}\" >> '$(pwd)/apcurllog'" "case \"\${last}\" in https://alpine.invalid/v3.22/main/*) FAKE_CURL_BODY='${apfix}/main/APKINDEX.tar.gz' ;; https://alpine.invalid/v3.22/community/*) FAKE_CURL_BODY='${apfix}/community/APKINDEX.tar.gz' ;; *) exit 7 ;; esac" 'export FAKE_CURL_BODY' 'exec sh "${0%/*}/fake-curl" "${@}"' > apcurl/curl && chmod 755 apcurl/curl
 PATH="${apcurl}:${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/apres" CMDFOUND_ALPINE_MIRROR=https://alpine.invalid FAKE_CURL_LOG="$(pwd)/apfakelog" FAKE_CURL_STALL=1 cmdfound --channel "${apch}" index > /dev/null 2>&1 & appid="${!}"
-i=0; while [ ! -s "apres/channels/alpine/index/main.part.${appid}" ] && [ "${i}" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done; sleep 0.2
+i=0; while [ ! -s "apres/channels/alpine/index/main.APKINDEX-x86_64.tar.gz.part.${appid}" ] && [ "${i}" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done; sleep 0.2
 kill -TERM "${appid}"; wait "${appid}"; test X"${?}" = X"143"
-test -s apres/channels/alpine/index/main.part && test -s apres/channels/alpine/index/main.part.etag
-test X"$(PATH="${apcurl}:${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/apres" CMDFOUND_ALPINE_MIRROR=https://alpine.invalid FAKE_CURL_LOG="$(pwd)/apfakelog" cmdfound --channel "${apch}" index | head -1)" = X"packages=142"
+test -s apres/channels/alpine/index/main.APKINDEX-x86_64.tar.gz.part && test -s apres/channels/alpine/index/main.APKINDEX-x86_64.tar.gz.part.etag
+test X"$(PATH="${apcurl}:${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/apres" CMDFOUND_ALPINE_MIRROR=https://alpine.invalid FAKE_CURL_LOG="$(pwd)/apfakelog" cmdfound --channel "${apch}" index | grep '^packages=')" = X"packages=142"
 test X"$(tr '\n' ' ' < apfakelog)" = X'resume=0 if-range= resume=1 if-range="cf1" resume=0 if-range= '
 test X"$(PATH="${apcurl}:${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/apnet" CMDFOUND_ALPINE_REGISTRY=https://registry-1.docker.io cmdfound --channel "${apch}" probe figlet | awk -F= '$1 ~ /^image/')" = X"image=docker.io/library/alpine:3.22"
 test X"$(PATH="${apcurl}:${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/apnet" CMDFOUND_ALPINE_REGISTRY=https://registry.invalid cmdfound --channel "${apch}" probe figlet | awk -F= '$1 ~ /^image/')" = X"image=docker.io/library/alpine:3.22"
 test X"$(awk '{sub(/\?.*$/, "", $2); print $2}' apcurllog | tr '\n' ' ')" = X"https://alpine.invalid/v3.22/main/x86_64/APKINDEX.tar.gz https://alpine.invalid/v3.22/main/x86_64/APKINDEX.tar.gz https://alpine.invalid/v3.22/community/x86_64/APKINDEX.tar.gz https://auth.docker.io/token https://registry.invalid/v2/library/alpine/manifests/3.22 "
 test X"$(awk '{print $1}' apcurllog | LC_ALL=C sort -u)" = X"-q"
+#a package listed twice, as Alpine 3.22 lists dotnet 8 and 9, is answered with
+#the newest: that is the one apk installs
+mkdir -p apdup/v3.22/main/x86_64 apdup/v3.22/community/x86_64 && cp apfix/main/APKINDEX.tar.gz apdup/v3.22/main/x86_64/ && cp apfix/dup/APKINDEX.tar.gz apdup/v3.22/community/x86_64/
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/apduph" CMDFOUND_ALPINE_MIRROR="$(pwd)/apdup" cmdfound --channel "${apch}" index >/dev/null
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/apduph" CMDFOUND_ALPINE_MIRROR="$(pwd)/apdup" cmdfound --channel "${apch}" probe twice | awk -F= '$1 == "version" {print $2}')" = X"9.0.1-r0"
+#@section{wolfi}
+#wolfi, a catalog: Wolfi's packages, a row of the same apk channel as alpine's.
+#Its index keeps every version, so each name answers its newest and only what
+#that one provides; the image is Chainguard's, of several layers
+woch="${realch}/distro.d/apk.d/wolfi"; woh="$(pwd)/woh"; wod="sha256:$(sha256sum woreg/v2/chainguard/wolfi-base/manifests/latest | awk '{print $1}')"
+test X"$(cmdfound --channel "${woch}" meta | tr '\n' ' ')" = X"kind=catalog confines=yes describes=environment "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" cmdfound --channel "${woch}" index | tr '\n' ' ')" = X"arrived=yes packages=113 names=108 bytes=$(wc -c < wofix/os/APKINDEX.tar.gz | awk '{print $1}') "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/wow" cmdfound --channel "${woch}" index bytes)" = X"bytes=$(wc -c < wofix/os/APKINDEX.tar.gz | awk '{print $1}')"
+#what the image has costs nothing: glibc comes with it
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" cmdfound --channel "${woch}" probe jq | tr '\n' ' ')" = X"version=1.8.2-r3 bytes=360000 estimate=yes package=jq image=docker.io/chainguard/wolfi-base:latest@${wod} image_bytes=6809372 "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" FAKE_UNAME_M=aarch64 cmdfound --channel "${woch}" probe jq | awk -F= '$1 == "image_bytes" {print $2}')" = X"7000000"
+#apk's order, which no listing follows: a _rc comes before the release, a _p
+#after it, a letter after that, and 10 after 9
+test X"$(for p in vt vp vl vn; do PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" cmdfound --channel "${woch}" probe "${p}" | head -1; done | tr '\n' ' ')" = X"version=1.2-r0 version=1.2_p1-r0 version=1.2a-r0 version=1.10-r0 "
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" cmdfound --channel "${woch}" probe jq-old >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" cmdfound --channel "${woch}" probe jq 1.7.1-r4 >/dev/null; test X"${?}" = X"1"
+#two machines only
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" FAKE_UNAME_M=armv7l cmdfound --channel "${woch}" probe jq >/dev/null; test X"${?}" = X"1"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/wow" FAKE_UNAME_M=armv7l cmdfound --channel "${woch}" index)" = X"unreachable=Wolfi is not built for armv7l"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" cmdfound --channel "${woch}" search JSON)" = X"$(printf 'wolfi:jq\tjq\tlightweight and flexible JSON processor')"
+#the recipe is one pinned apk line against the os repository alone
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" cmdfound --channel "${woch}" recipe jq 1.8.2-r3 jq | tr '\n' ' ')" = X"image=docker.io/chainguard/wolfi-base:latest@${wod} install=apk add --no-cache --repositories-file /dev/null -X ${womir}/os jq=1.8.2-r3 bin=jq "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" cmdfound --channel "${woch}" recipe jq 1.6-r2 jq)" = X"failed=wolfi's catalog has no jq 1.6-r2, it has 1.8.2-r3"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${woh}" cmdfound --channel "${woch}" recipe -jq 1.0-r0 jq)" = X"failed='-jq' '1.0-r0' is not a Wolfi package and version this channel will install"
+test ! -e wow
+#@section{ubuntu}
+#ubuntu, a catalog: Ubuntu 26.04's packages, a row of the apt channel. What
+#has a command is read off the archive's command-not-found index, and every
+#file is held to the sha256 its suite's InRelease lists
+ubch="${realch}/distro.d/apt.d/ubuntu"; ubh="$(pwd)/ubh"; ubd="sha256:$(sha256sum ubreg/v2/library/ubuntu/manifests/26.04 | awk '{print $1}')"
+#its catalog is unpacked with xz, which cmdfound gets first where it is not here
+test X"$(cmdfound --channel "${ubch}" meta | tr '\n' ' ')" = X"kind=catalog confines=yes describes=environment needs=xz "
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe hello > ubout; test X"${?}" = X"2"
+grep -x 'needs=index' ubout >/dev/null
+#the release is read by hash: its files by name are not the ones its InRelease lists
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" index | tr '\n' ' ')" = X"arrived=yes packages=122 names=130 bytes=$(cat ubmir/dists/*/InRelease ubfix/*.xz | wc -c | awk '{print $1}') "
+#and a file InRelease still lists is not fetched again
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" index | tail -1)" = X"bytes=$(cat ubmir/dists/*/InRelease | wc -c | awk '{print $1}')"
+#asked for its bytes it weighs each file with a HEAD and fetches nothing
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/ubw" cmdfound --channel "${ubch}" index bytes)" = X"bytes=$(cat ubmir/dists/*/InRelease ubmir/dists/*/*/cnf/Commands-amd64.xz ubmir/dists/*/*/binary-amd64/Packages.xz | wc -c | awk '{print $1}')"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/ubw" CMDFOUND_UBUNTU_MIRROR="$(pwd)/ubnone" cmdfound --channel "${ubch}" index bytes)" = X""
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/ubw" FAKE_UNAME_M=i686 cmdfound --channel "${ubch}" index)" = X"unreachable=Ubuntu 26.04 is not built for i686"
+test ! -e ubw
+#the cost is the package and what apt-get --no-install-recommends pulls in that
+#the image lacks, an estimate; libc6 and perl-base are the image's
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe hello | tr '\n' ' ')" = X"version=2.10-5 bytes=50000 estimate=yes package=hello image=docker.io/library/ubuntu:26.04@${ubd} image_bytes=29000000 "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" FAKE_UNAME_M=aarch64 cmdfound --channel "${ubch}" probe hello | awk -F= '$1 == "image_bytes" {print $2}')" = X"28000000"
+#-updates replaces the release: git is its version, with the command it added there
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe git-receive-pack | awk -F= '$1 == "version" || $1 == "bytes" || $1 == "package" {printf("%s ", $2)}')" = X"2.53.0-1ubuntu1.1 7860000 git "
+#a dependency is the package of its name, its version and :any dropped; of
+#alternatives, one there already pulls nothing in, else the first that is a
+#package does; a name only provided is its provider; Pre-Depends count; what
+#the image has costs nothing
+test X"$(for p in cowsay ubalt ubalt2 ubvirt-user ubpre awk; do PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe "${p}" | awk -F= '$1 == "bytes" {printf("%s ", $2)}'; done)" = X"3270000 51000 1000 8000 51000 0 "
+#restricted and multiverse are read as well
+test X"$(for p in ubnonfree ubmulti; do PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe "${p}" | awk -F= '$1 == "package" {printf("%s ", $2)}'; done)" = X"ubnonfree ubmulti "
+#a version is written without its epoch and with _ for ~, which cmdfound's
+#versions do not have; a command several packages have is a question, unless
+#the spec named this channel and one of them has the name
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe lzip > ubout; test X"${?}" = X"3"
+grep -x 'candidate=lzip' ubout >/dev/null
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" CMDFOUND_NAMED=ubuntu cmdfound --channel "${ubch}" probe lzip 1.26_rc1-2 | awk -F= '$1 == "package" || $1 == "version" {printf("%s ", $2)}')" = X"1.26_rc1-2 lzip "
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe nc > ubout; test X"${?}" = X"3"
+test X"$(tr '\n' ' ' < ubout)" = X"candidate=netcat-openbsd candidate=netcat-traditional "
+#a version, a name or an architecture that is not there is a no
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe hello 2.10-4 >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe nobody-gives-this >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" FAKE_UNAME_M=mips cmdfound --channel "${ubch}" probe hello >/dev/null; test X"${?}" = X"1"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" search swiss army)" = X"$(printf 'ubuntu:netcat-openbsd\tnc,netcat\tTCP/IP swiss army knife\nubuntu:netcat-traditional\tnc,nc.traditional,netcat\tTCP/IP swiss army knife')"
+#the recipe sets the image's sources aside for the suites read, and installs
+#the version as the archive writes it, epoch and ~ included
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" recipe lzip 1.26_rc1-2 lzip | tr '\n' ' ')" = X"image=docker.io/library/ubuntu:26.04@${ubd} install=rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* && printf '%s\n' 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] ${ubmir} resolute main restricted universe multiverse' 'deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] ${ubmir} resolute-updates main restricted universe multiverse' > /etc/apt/sources.list.d/cmdfound.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends lzip=1.26~rc1-2 && rm -rf /var/lib/apt/lists/* bin=lzip "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" recipe git 2.53.0-1ubuntu1.1 scalar | awk '/^install=/ {sub(/ && rm -rf .*$/, ""); sub(/.* /, ""); print; next} /^bin=/' | tr '\n' ' ')" = X"git=1:2.53.0-1ubuntu1.1 bin=scalar "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" recipe git 2.53.0-1ubuntu1 git)" = X"failed=ubuntu's catalog has no git 2.53.0-1ubuntu1, it has 2.53.0-1ubuntu1.1"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" recipe Lzip 1.26_rc1-2 lzip)" = X"failed=ubuntu's catalog has no Lzip 1.26_rc1-2"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" CMDFOUND_UBUNTU_MIRROR='http://mirror.invalid/a b' cmdfound --channel "${ubch}" recipe hello 2.10-5 hello >/dev/null; test X"${?}" = X"1"
+#nothing a shell would read as more reaches the line apt-get runs as root
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe evil >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" probe evilver >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${ubh}" cmdfound --channel "${ubch}" recipe 'evil$(id)' 1.0-1 evil > ubout; test X"${?}" = X"1"
+test X"$(awk -F= '$1 != "failed"' ubout)" = X""
+#a file that is not the one its InRelease lists is not read, and the catalog
+#had stays
+cp -R ubmir ubbad && printf '%s\n' 'not the file' | xz -c > ubbad/dists/resolute-updates/main/binary-amd64/Packages.xz
+cp -R ubh ubh2 && rm ubh2/channels/ubuntu/index/resolute-updates.main.pkg-amd64.xz
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/ubh2" CMDFOUND_UBUNTU_MIRROR="$(pwd)/ubbad" cmdfound --channel "${ubch}" index > ubout; test X"${?}" = X"2"
+test X"$(cat ubout)" = X"unreachable=Ubuntu's resolute-updates main/binary-amd64/Packages.xz is not the one its InRelease names, the old catalog is kept"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/ubh2" cmdfound --channel "${ubch}" probe git | head -1)" = X"version=2.53.0-1ubuntu1.1"
+test ! -e ubh2/channels/ubuntu/index/resolute-updates.main.pkg-amd64.xz
+#@section{fedora}
+#fedora, a catalog: Fedora 44's packages, a row of the rpm channel, answered
+#from the primary.xml of its releases and of its updates
+fdch="${realch}/distro.d/rpm.d/fedora"; fdh="$(pwd)/fdh"; fdd="sha256:$(sha256sum fdreg/v2/library/fedora/manifests/44 | awk '{print $1}')"; fdbytes="$(cat "${fdrel}"/repodata/* "${fdupd}"/repodata/* | wc -c | awk '{print $1}')"
+test X"$(cmdfound --channel "${fdch}" meta | tr '\n' ' ')" = X"kind=catalog confines=yes describes=environment needs=zstd "
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe jq > fdout; test X"${?}" = X"2"
+grep -x 'needs=index' fdout >/dev/null
+#both repositories, each name once at its newest and nothing built for i686
+#alone; the bytes are both repomd.xml and both primary.xml
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" index | tr '\n' ' ')" = X"arrived=yes packages=126 names=129 bytes=${fdbytes} "
+#asked for its bytes it reads the two repomd.xml and writes nothing; with one
+#of them missing there is no half answer, and no answer
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/fdw" cmdfound --channel "${fdch}" index bytes)" = X"bytes=${fdbytes}"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/fdw" CMDFOUND_FEDORA_MIRROR="$(pwd)/fdnone" cmdfound --channel "${fdch}" index bytes)" = X""
+test ! -e fdw
+#jq is answered from updates, newer than the release's: oniguruma comes with
+#it, glibc is in the image, and what it only recommends is not installed
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe jq | tr '\n' ' ')" = X"version=1.8.1-3.fc44 bytes=452514 estimate=yes package=jq image=docker.io/library/fedora:44@${fdd} image_bytes=69396734 "
+#a rich dependency is dnf's to weigh and is not counted; a path required is
+#the package that has it
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe vim | awk -F= '$1 == "package" || $1 == "bytes" {printf("%s ", $2)}')" = X"9000000 vim-enhanced "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe pyscript | awk -F= '$1 == "package" || $1 == "bytes" {printf("%s ", $2)}')" = X"43000 pyscript "
+#rpm's order: the epoch first; a ~ before the release and a ^ after it but
+#before 1.9.1; 1.10 after 1.9; a number after a letter; release 10 after 9
+test X"$(for p in epo vt vc vn va vr; do PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe "${p}" | head -1; done | tr '\n' ' ')" = X"version=1.0-1.fc44 version=1.9-1.fc44 version=1.9.1-1.fc44 version=1.10-1.fc44 version=1.0.1-1.fc44 version=1.0-10.fc44 "
+#i686's glibc is newer and is not the one answered; one built for i686 alone
+#and an older version are not there
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe ldd | awk -F= '$1 == "version" || $1 == "bytes" {printf("%s ", $2)}')" = X"2.43-5.fc44 0 "
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe only32 >/dev/null; test X"${?}" = X"1"
+#a version with a ~ is written with a _, as a ^ is with a +: cmdfound's
+#versions have neither. dnf is told the version as rpm writes it
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe tilde | head -1)" = X"version=2.0_beta1-1.fc44"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" recipe tilde 2.0_beta1-1.fc44 tilde | awk '/^install=/ {sub(/ && dnf clean all$/, ""); sub(/.* /, ""); print}')" = X"tilde-2.0~beta1-1.fc44"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe caret | head -1)" = X"version=2.0+git1-1.fc44"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe jq 1.8.1-2.fc44 >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" FAKE_UNAME_M=mips cmdfound --channel "${fdch}" probe jq >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe vi > fdout; test X"${?}" = X"3"
+test X"$(tr '\n' ' ' < fdout)" = X"candidate=nvi candidate=vim-minimal "
+#each machine reads its own repositories: this mirror has none for aarch64
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/fdarm" FAKE_UNAME_M=aarch64 cmdfound --channel "${fdch}" index)" = X"unreachable=there is no fedora catalog for Fedora 44 on aarch64 at ${fdmir}"
+#search reads names, commands and summaries, as XML writes them unescaped
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" search '& FONTS')" = X"$(printf 'fedora:toilet\ttoilet\tColor letters & fonts for the terminal')"
+#the recipe is one dnf line that installs that version from this mirror's
+#repositories alone and no weak dependency, in the image by digest
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" recipe jq 1.8.1-3.fc44 jq | tr '\n' ' ')" = X"image=docker.io/library/fedora:44@${fdd} install=dnf install -y --setopt=install_weak_deps=False --repo=fedora --setopt=fedora.metalink= --setopt=fedora.mirrorlist= --setopt=fedora.baseurl=${fdrel} --repo=updates --setopt=updates.metalink= --setopt=updates.mirrorlist= --setopt=updates.baseurl=${fdupd} jq-1.8.1-3.fc44 && dnf clean all bin=jq "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" recipe jq 1.8.1-2.fc44 jq)" = X"failed=fedora's catalog has no jq 1.8.1-2.fc44, it has 1.8.1-3.fc44"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" recipe -jq 1.0-1 jq)" = X"failed='-jq' '1.0-1' is not a Fedora package and version this channel will install"
+#nothing a shell would read as more reaches the line dnf runs as root
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe evil >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe evilver >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" probe dashevil >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" recipe 'evil$(id)' 1.0-1.fc44 evil > fdout; test X"${?}" = X"1"
+test X"$(awk -F= '$1 != "failed"' fdout)" = X""
+#a primary.xml kept is not fetched again while its repomd.xml names it; one
+#that is not the one named is not read, the old catalog stays, and nothing
+#fetched is left behind but what was kept
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${fdh}" cmdfound --channel "${fdch}" index | tail -1)" = X"bytes=$(cat "${fdrel}"/repodata/repomd.xml "${fdupd}"/repodata/repomd.xml | wc -c | awk '{print $1}')"
+cp -R fdmir fdbad && for f in fdbad/updates/44/Everything/x86_64/repodata/*-primary.xml.zst; do printf 'x' >> "${f}"; done
+cp -R fdh fdh2 && rm fdh2/channels/fedora/index/updates.primary.zst
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/fdh2" CMDFOUND_FEDORA_MIRROR="$(pwd)/fdbad" cmdfound --channel "${fdch}" index > fdout; test X"${?}" = X"2"
+test X"$(cat fdout)" = X"unreachable=Fedora's updates primary.xml is not the one its repomd.xml names, the old catalog is kept"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/fdh2" cmdfound --channel "${fdch}" probe jq | head -1)" = X"version=1.8.1-3.fc44"
+test X"$(ls -A fdh2/channels/fedora/index | tr '\n' ' ')" = X"fedora.primary.zst fedora.repomd.xml fedora.tsv updates.repomd.xml "
+#@section{opensuse}
+#opensuse, a catalog: openSUSE Tumbleweed's oss repository, the second row of
+#the rpm channel, its primary.xml named by a sha512 and compressed with gzip
+osch="${realch}/distro.d/rpm.d/opensuse"; osh="$(pwd)/osh"; osd="sha256:$(sha256sum osreg/v2/opensuse/tumbleweed/manifests/latest | awk '{print $1}')"; osbytes="$(cat "${ososs}"/repodata/* | wc -c | awk '{print $1}')"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${osh}" cmdfound --channel "${osch}" index | tr '\n' ' ')" = X"arrived=yes packages=105 names=103 bytes=${osbytes} "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${osh}" cmdfound --channel "${osch}" probe jq | tr '\n' ' ')" = X"version=1.8.2-3.1 bytes=460562 estimate=yes package=jq image=docker.io/opensuse/tumbleweed:latest@${osd} image_bytes=43724643 "
+#the recipe adds this mirror's repository under a name of its own, and
+#installs that version from it alone, with no recommended package
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${osh}" cmdfound --channel "${osch}" recipe jq 1.8.2-3.1 jq | tr '\n' ' ')" = X"image=docker.io/opensuse/tumbleweed:latest@${osd} install=zypper --non-interactive addrepo ${ososs} opensuse-repo-oss && zypper --non-interactive install --no-recommends --repo opensuse-repo-oss jq=1.8.2-3.1 && zypper clean --all bin=jq "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/osw" FAKE_UNAME_M=aarch64 cmdfound --channel "${osch}" index)" = X"unreachable=openSUSE Tumbleweed is not built for aarch64"
+#a sha512 is checked as a sha256 is
+cp -R osmir osbad && for f in osbad/tumbleweed/repo/oss/repodata/*-primary.xml.gz; do printf 'x' >> "${f}"; done
+cp -R osh osh2 && rm osh2/channels/opensuse/index/repo-oss.primary.gz
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/osh2" CMDFOUND_OPENSUSE_MIRROR="$(pwd)/osbad" cmdfound --channel "${osch}" index > osout; test X"${?}" = X"2"
+test X"$(cat osout)" = X"unreachable=openSUSE Tumbleweed's repo-oss primary.xml is not the one its repomd.xml names, the old catalog is kept"
+#@section{epel}
+#epel, a catalog: EPEL 10 and what AlmaLinux 10 has, a row of the rpm channel.
+#AlmaLinux's repositories are the image's own; EPEL's is named by its url and
+#its key, on a host of its own
+epch="${realch}/distro.d/rpm.d/epel"; eph="$(pwd)/eph"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${eph}" cmdfound --channel "${epch}" index | grep '^packages=')" = X"packages=126"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${eph}" cmdfound --channel "${epch}" probe jq | head -1)" = X"version=1.8.1-3.fc44"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${eph}" cmdfound --channel "${epch}" recipe jq 1.8.1-3.fc44 jq | tr '\n' ' ')" = X"image=docker.io/library/almalinux:10 install=dnf install -y --setopt=install_weak_deps=False --repo=baseos --setopt=baseos.metalink= --setopt=baseos.mirrorlist= --setopt=baseos.baseurl=${epmir}/10/BaseOS/x86_64/os --repo=appstream --setopt=appstream.metalink= --setopt=appstream.mirrorlist= --setopt=appstream.baseurl=${epmir}/10/AppStream/x86_64/os --repo=crb --setopt=crb.metalink= --setopt=crb.mirrorlist= --setopt=crb.baseurl=${epmir}/10/CRB/x86_64/os --repofrompath=epel,${epepel}/10/Everything/x86_64 --repo=epel --setopt=epel.gpgcheck=1 --setopt=epel.gpgkey=${epepel}/RPM-GPG-KEY-EPEL-10 jq-1.8.1-3.fc44 && dnf clean all bin=jq "
+#nothing a shell would read as more reaches dnf's line: not a repository's url, not a key's
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${eph}" CMDFOUND_EPEL_MIRROR='http://epel.invalid/a b' cmdfound --channel "${epch}" recipe jq 1.8.1-3.fc44 jq > epout; test X"${?}" = X"1"
+test X"$(awk -F= '$1 != "failed"' epout)" = X""
+#@section{rosa}
+#rosa, a catalog: ROSA 13, a row of the rpm channel. The image knows main alone,
+#under a name with the architecture in it, so the three repositories are named
+#by url, with the key the image has
+rsch="${realch}/distro.d/rpm.d/rosa"; rsh="$(pwd)/rsh"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${rsh}" cmdfound --channel "${rsch}" index | grep '^packages=')" = X"packages=126"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${rsh}" cmdfound --channel "${rsch}" probe jq | head -1)" = X"version=1.8.1-3.fc44"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${rsh}" cmdfound --channel "${rsch}" recipe jq 1.8.1-3.fc44 jq | tr '\n' ' ')" = X"image=docker.io/rosalab/rosa13:latest install=dnf install -y --setopt=install_weak_deps=False --repofrompath=rosa-main,${rsmir}/rosa13/repository/x86_64/main/release --repo=rosa-main --setopt=rosa-main.gpgcheck=1 --setopt=rosa-main.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-ROSA --repofrompath=rosa-contrib,${rsmir}/rosa13/repository/x86_64/contrib/release --repo=rosa-contrib --setopt=rosa-contrib.gpgcheck=1 --setopt=rosa-contrib.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-ROSA --repofrompath=rosa-non-free,${rsmir}/rosa13/repository/x86_64/non-free/release --repo=rosa-non-free --setopt=rosa-non-free.gpgcheck=1 --setopt=rosa-non-free.gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-ROSA jq-1.8.1-3.fc44 && dnf clean all bin=jq "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/rsw" FAKE_UNAME_M=ppc64le cmdfound --channel "${rsch}" index)" = X"unreachable=ROSA 13 is not built for ppc64le"
+#@section{alt}
+#alt, a catalog: ALT p11, a row of the aptrpm channel, read off the rpm headers
+#of its pkglists, each held to the BLAKE2b its release lists
+alch="${realch}/distro.d/aptrpm.d/alt"; alh="$(pwd)/alh"
+#busybox has no b2sum, and ALT's releases have no stronger sum than BLAKE2b
+alneeds="xz"; command -v b2sum >/dev/null 2>&1 || alneeds="xz openssl"
+test X"$(cmdfound --channel "${alch}" meta | tr '\n' ' ')" = X"kind=catalog confines=yes describes=environment needs=${alneeds} "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${alh}" cmdfound --channel "${alch}" index | tr '\n' ' ')" = X"arrived=yes packages=107 names=106 bytes=$(cat almir/p11/branch/*/base/release almir/p11/branch/*/base/pkglist.classic.xz | wc -c | awk '{print $1}') "
+#libonig comes with jq by the library it provides, and /bin/sh is the image's
+#bash by a file it has; an epoch is no part of cmdfound's version
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${alh}" cmdfound --channel "${alch}" probe jq | tr '\n' ' ')" = X"version=1.8.2-alt1 bytes=600000 estimate=yes package=jq image=docker.io/library/alt:p11 "
+test X"$(for p in lnx-indent acpid GNUWash; do PATH="${apbin}:${PATH}" CMDFOUND_HOME="${alh}" cmdfound --channel "${alch}" probe "${p}" | awk -F= '$1 == "package" {printf("%s ", $2)}'; done)" = X"cindent acpid GNUWash "
+#apt-get is told the version with its epoch, without which it matches nothing,
+#and rpm is asked afterwards: apt-get can end well having installed nothing
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${alh}" cmdfound --channel "${alch}" recipe jq 1.8.2-alt1 jq | awk '/^install=/')" = X"install=rm -f /etc/apt/sources.list.d/*.list && printf '%s\n' 'rpm [p11] ${almir} p11/branch/x86_64 classic' 'rpm [p11] ${almir} p11/branch/noarch classic' > /etc/apt/sources.list && apt-get update && apt-get install -y jq=1:1.8.2-alt1 && rpm -q jq && apt-get clean"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/alw" FAKE_UNAME_M=riscv64 cmdfound --channel "${alch}" index)" = X"unreachable=ALT p11 is not built for riscv64"
+#a pkglist that is not the one its release names is not read, and the catalog had stays
+cp -R almir albad && printf 'x' >> albad/p11/branch/x86_64/base/pkglist.classic.xz
+cp -R alh alh2 && rm alh2/channels/alt/index/x86_64.pkglist.xz
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/alh2" CMDFOUND_ALT_MIRROR="$(pwd)/albad" cmdfound --channel "${alch}" index > alout; test X"${?}" = X"2"
+test X"$(cat alout)" = X"unreachable=ALT's x86_64 pkglist is not the one its release names, the old catalog is kept"
+#@section{pacman}
+#arch and blackarch, catalogs: rows of the pacman channel, read off each
+#repository's database, which pacman checks in the image as it does the packages
+pcch="${realch}/distro.d/pacman.d/arch"; pch="$(pwd)/pch"; bach="${realch}/distro.d/pacman.d/blackarch"; bah="$(pwd)/bah"
+test X"$(cmdfound --channel "${pcch}" meta | tr '\n' ' ')" = X"kind=catalog confines=yes describes=environment "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${pch}" cmdfound --channel "${pcch}" index | tr '\n' ' ')" = X"arrived=yes packages=109 names=107 bytes=$(cat pcmir/*/os/x86_64/*.files | wc -c | awk '{print $1}') "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/pcw" cmdfound --channel "${pcch}" index bytes)" = X"bytes=$(cat pcmir/*/os/x86_64/*.files | wc -c | awk '{print $1}')"
+test ! -e pcw
+#what a package pulls in that the image lacks: glibc is had, oniguruma comes
+#with jq by its name and with nmap by the library it provides
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${pch}" cmdfound --channel "${pcch}" probe jq | tr '\n' ' ')" = X"version=1.8.2-1 bytes=600000 estimate=yes package=jq image=docker.io/library/archlinux:latest "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${pch}" cmdfound --channel "${pcch}" probe nmap | awk -F= '$1 == "bytes" {print $2}')" = X"2500000"
+#an epoch is no part of the version cmdfound writes, and is of what pacman is told
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${pch}" cmdfound --channel "${pcch}" probe epo | head -1)" = X"version=2.0-1"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${pch}" cmdfound --channel "${pcch}" recipe epo 2.0-1 epo | tr '\n' ' ')" = X"image=docker.io/library/archlinux:latest install=printf '%s\n' 'Server = ${pcmir}/\$repo/os/\$arch' > /etc/pacman.d/mirrorlist && pacman -Sy --noconfirm && pacman -S --noconfirm --needed 'epo=1:2.0-1' && rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/* bin=epo "
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${pch}" cmdfound --channel "${pcch}" probe lib32-glibc >/dev/null; test X"${?}" = X"1"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/pcw" FAKE_UNAME_M=aarch64 cmdfound --channel "${pcch}" index)" = X"unreachable=Arch is not built for aarch64"
+#blackarch answers its own repository's commands, each its own package however
+#the database orders a package's two members; what Arch has, a jq of its own
+#included, is the arch channel's, and its .db is only what the tools pull in
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${bah}" cmdfound --channel "${bach}" index | tr '\n' ' ')" = X"arrived=yes packages=111 names=2 bytes=$(cat pcmir/*/os/x86_64/*.db pcba/blackarch/os/x86_64/blackarch.files | wc -c | awk '{print $1}') "
+test X"$(for p in intrace myjwt; do PATH="${apbin}:${PATH}" CMDFOUND_HOME="${bah}" cmdfound --channel "${bach}" probe "${p}" | awk -F= '$1 == "package" || $1 == "bytes" {printf("%s ", $2)}'; done)" = X"17475 intrace 9050000 myjwt "
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${bah}" cmdfound --channel "${bach}" probe jq >/dev/null; test X"${?}" = X"1"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${bah}" cmdfound --channel "${bach}" probe nmap >/dev/null; test X"${?}" = X"1"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${bah}" cmdfound --channel "${bach}" recipe intrace 1.6-1 intrace | awk '/^install=/')" = X"install=printf '%s\n' 'Server = ${pcmir}/\$repo/os/\$arch' > /etc/pacman.d/mirrorlist && printf '%s\n' 'Server = ${pcba}/\$repo/os/\$arch' > /etc/pacman.d/blackarch-mirrorlist && pacman -Sy --noconfirm && pacman -S --noconfirm --needed 'intrace=1.6-1' && rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*"
+#nothing a shell would read as more reaches pacman's line
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${bah}" CMDFOUND_BLACKARCH_MIRROR='http://blackarch.invalid/a b' cmdfound --channel "${bach}" recipe intrace 1.6-1 intrace > pcout; test X"${?}" = X"1"
+test X"$(awk -F= '$1 != "failed"' pcout)" = X""
+#chaotic-aur answers its own repository's commands from a zstd .files, its
+#packages priced over Arch's; the image does not know it, and the line adds it
+#under the key it pins and the keyring that key signs
+cach="${realch}/distro.d/pacman.d/chaotic-aur"; cah="$(pwd)/cah"
+test X"$(cmdfound --channel "${cach}" meta | tr '\n' ' ')" = X"kind=catalog confines=yes describes=environment needs=zstd "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${cah}" cmdfound --channel "${cach}" index | tr '\n' ' ')" = X"arrived=yes packages=110 names=1 bytes=$(cat pcmir/*/os/x86_64/*.db pcaur/chaotic-aur/x86_64/chaotic-aur.files | wc -c | awk '{print $1}') "
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${cah}" cmdfound --channel "${cach}" probe auracle | awk -F= '$1 == "package" || $1 == "bytes" {printf("%s ", $2)}')" = X"900000 auracle-git "
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${cah}" cmdfound --channel "${cach}" probe jq >/dev/null; test X"${?}" = X"1"
+test X"$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="${cah}" cmdfound --channel "${cach}" recipe auracle-git r464.885e962-1.1 auracle | awk '/^install=/')" = X"install=printf '%s\n' 'Server = ${pcmir}/\$repo/os/\$arch' > /etc/pacman.d/mirrorlist && pacman-key --init && pacman-key --recv-keys EF925EA60F33D0CB85C44AD13056513887B78AEB --keyserver hkps://keyserver.ubuntu.com && pacman-key --lsign-key EF925EA60F33D0CB85C44AD13056513887B78AEB && pacman -U --noconfirm '${pcaur}/chaotic-aur/chaotic-keyring.pkg.tar.zst' && printf '%s\n' '[chaotic-aur]' 'Server = ${pcaur}/\$repo/\$arch' >> /etc/pacman.conf && pacman -Sy --noconfirm && pacman -S --noconfirm --needed 'auracle-git=r464.885e962-1.1' && rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*"
+PATH="${apbin}:${PATH}" CMDFOUND_HOME="${cah}" CMDFOUND_CHAOTIC_MIRROR='http://chaotic.invalid/a b' cmdfound --channel "${cach}" recipe auracle-git r464.885e962-1.1 auracle > caout; test X"${?}" = X"1"
+test X"$(awk -F= '$1 != "failed"' caout)" = X""
 #@section{confined-launch}
 #confined-launch is the rules a program in a container runs by, one file both
 #runtimes source. It is not executable, so no spec reaches it
-clch="$(cd ../.. && pwd)/cmdfound.d"; cl="${clch}/confined-launch"
+clch="$(cd ../.. && pwd)/cmdfound.d"; cl="${clch}/docker.d/confined-launch"
 test -f "${cl}" && test ! -x "${cl}"
 test X"$(CMDFOUND_CHANNELS="${clch}" cmdfound --yes confined-launch:x 2>&1)" = X"cmdfound: no channel called 'confined-launch'"
+#nor is cmdfound.d/discarded, a directory of notes on sources ruled out
+test X"$(CMDFOUND_CHANNELS="${clch}" cmdfound --yes discarded:x 2>&1)" = X"cmdfound: no channel called 'discarded'"
+#a family's rows are channels by their names, however deep: distro.d/rpm.d/fedora
+#is fedora, run by distro, which is no channel itself; and no two channels,
+#a file of their own or a row, share a name
+test X"$(CMDFOUND_CHANNELS="${clch}" cmdfound --channel fedora meta | head -1)" = X"kind=catalog"
+test X"$(CMDFOUND_CHANNELS="${clch}" cmdfound --yes distro:x 2>&1)" = X"cmdfound: no channel called 'distro'"
+test X"$({ for f in "${clch}"/*; do [ -f "${f}" ] && [ -x "${f}" ] && printf '%s\n' "${f##*/}"; done; for f in "${clch}"/*.d/*.d/*; do [ -f "${f}" ] && printf '%s\n' "${f##*/}"; done; } | sort | uniq -d)" = X""
 #it is read here through a driver that sources it and prints a runtime's
 #arguments one <word> a line, and exits 127 where a launcher would. Nothing
 #below depends on who runs the tests or where they live: the ids come from a
@@ -2021,7 +2479,7 @@ test X"$(sh "${clrun}" network | tr '\n' ' ')" = X"<> "
 #--no-config and --no-hsts. CURL_HOME, XDG_CONFIG_HOME and WGETRC are emptied,
 #so the rc files read are this HOME's whatever the machine running it has
 unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY SSL_CERT_FILE CURL_CA_BUNDLE SSL_CERT_DIR
-hostile="$(pwd)/hostile"; web="$(pwd)/web"; webwrong="$(pwd)/webwrong"; nocurl="$(pwd)/nocurl"; toolsdir="$(cd ../.. && pwd)"
+hostile="$(pwd)/hostile"; web="$(pwd)/web"; webwrong="$(pwd)/webwrong"; nocurl="$(pwd)/nocurl"; toolsdir="$(pwd)/inbin"
 mkdir -p hostile cleanhome webcurl webwget nocurl webb web/files.invalid web/github.com/aquaproj/aqua-registry/releases web/raw.githubusercontent.com/aquaproj/aqua-registry/v4.999.0 web/mm.invalid/releases web/raw.githubusercontent.com/javier-lopez/cmdfound/master
 printf '%s\n' 'include' 'write-out = "\n"' 'remote-name-all' 'fail' 'remote-time' 'insecure' 'proxy = "http://proxy.invalid:3128"' "cacert = ${hostile}/ca.pem" > hostile/.curlrc
 printf '%s\n' 'verbose = on' 'save_headers = on' 'check_certificate = off' > hostile/.wgetrc
@@ -2029,7 +2487,7 @@ hostenv="HOME=${hostile} CURL_HOME= XDG_CONFIG_HOME= WGETRC= TAR_OPTIONS=-vOt GZ
 cp ../cmdfound.d/fake-web webcurl/curl && cp ../cmdfound.d/fake-web webwget/wget && chmod 755 webcurl/curl webwget/wget
 webenv="PATH=$(pwd)/webcurl:${PATH} FAKE_WEB_ROOT=${web} FAKE_WEB_WRONG=${webwrong}"
 #wget is only used where there is no curl, so its runs get a PATH without one
-l=""; for c in sh bash awk sed tar xz gzip bzip2 unzip sha256sum cp mv rm mkdir ln cat wc head tr sort find grep date readlink uname chmod sleep env expr ls touch; do l="${l} $(command -v "${c}")"; done; ln -s ${l} nocurl/
+l=""; for c in sh bash awk sed tar xz gzip bzip2 unzip od sha256sum cp mv rm mkdir ln cat wc head tr sort find grep date readlink uname chmod sleep env expr ls touch; do l="${l} $(command -v "${c}")"; done; ln -s ${l} nocurl/
 wgetenv="PATH=${toolsdir}:${nocurl}:$(pwd)/webwget FAKE_WEB_ROOT=${web} FAKE_WEB_WRONG=${webwrong}"
 #@section{downloads}
 #a program in every format cmdfound unpacks, each published with its digest
@@ -2073,7 +2531,7 @@ test X"$(env ${webenv} ${hostenv} ${cfenv} CMDFOUND_HOME="$(pwd)/hhcf" cmdfound 
 test X"$(env ${wgetenv} ${hostenv} ${cfenv} CMDFOUND_HOME="$(pwd)/hwcf" cmdfound --channel "${cfdir}" index; env ${wgetenv} ${hostenv} ${cfenv} CMDFOUND_HOME="$(pwd)/hwcf" cmdfound --channel "${cfdir}" probe micromamba; env ${wgetenv} ${hostenv} ${cfenv} CMDFOUND_HOME="$(pwd)/hwcf" cmdfound --channel "${cfdir}" locate micromamba 9.9.10-0)" = X"${cfclean}"
 #and the catalogs that came later: nix-portable's, Alpine's and crates.io's
 mkdir -p npneeds biplat2 web/nix.invalid/channel "web/nix.invalid/releases/${nprel}" web/reg.invalid/v2/library/alpine/manifests web/rel.invalid/r && cp ../cmdfound.d/fake-sqlite3 npneeds/sqlite3 && printf '%s\n' '#!/bin/sh' 'exit 1' > npneeds/np-refuses && chmod 755 npneeds/sqlite3 npneeds/np-refuses && ln -s "${biplat}/uname" "${biplat}/getconf" biplat2/
-printf '%s\n' "https://nix.invalid/releases/${nprel}/nixexprs.tar.xz" > web/nix.invalid/channel/nixexprs.tar.xz.302 && ln -s "$(pwd)/nixch/nixexprs.tar.xz" "web/nix.invalid/releases/${nprel}/nixexprs.tar.xz"
+printf '%s\n' "https://nix.invalid/releases/${nprel}/nixexprs.tar.xz" > web/nix.invalid/channel/nixexprs.tar.xz.302 && ln -s "$(pwd)/nixch/nixexprs.tar.xz" "web/nix.invalid/releases/${nprel}/nixexprs.tar.xz" && ln -s "$(pwd)/nixch/store-paths.xz" "web/nix.invalid/releases/${nprel}/store-paths.xz"
 ln -s "${apmir}" web/apk.invalid && ln -s "${apreg}"/v2/library/alpine/manifests/* web/reg.invalid/v2/library/alpine/manifests/ && printf 'Docker-Content-Digest: sha256:%s\r\n' "$(sha256sum apreg/v2/library/alpine/manifests/3.22 | awk '{print $1}')" > web/reg.invalid/v2/library/alpine/manifests/3.22.headers
 ln -s "${bisite}/index.invalid" "${bisite}/qi.invalid" "${bisite}/dl.invalid" web/ && ln -s "${birel}/download" "${birel}/expanded_assets" web/rel.invalid/r/ && printf '%s\n' 'https://rel.invalid/r/releases/tag/v9.9.10' > web/rel.invalid/r/latest.302
 for r in biauthor:v1.0.0 binone:1.0.0; do mkdir -p "web/gh.invalid/acme/${r%:*}/releases" && ln -s "${bigh}/acme/${r%:*}/releases/expanded_assets" "web/gh.invalid/acme/${r%:*}/releases/" && printf 'https://gh.invalid/acme/%s/releases/tag/%s\n' "${r%:*}" "${r#*:}" > "web/gh.invalid/acme/${r%:*}/releases/latest.302"; done
@@ -2086,12 +2544,12 @@ test X"$(env PATH="$(pwd)/npneeds:${PATH}" ${hostenv} CMDFOUND_HOME="$(pwd)/hhnp
 #a nixpkgs is unpacked the first time a program is installed from it
 cp -R hcnp hhnpo && env ${hostenv} CMDFOUND_HOME="$(pwd)/hhnpo" CMDFOUND_REQUIRED="$(pwd)/npneeds/np-refuses" cmdfound --channel "${realch}/nix-portable" obtain figlet "${nprel}" 2>/dev/null | grep -x "failed=nix could not evaluate nixpkgs.figlet in ${nprel}" >/dev/null
 test -f "hhnpo/channels/nix-portable/nixpkgs/${nprel}/default.nix"
-apclean="$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/hcal" CMDFOUND_ALPINE_MIRROR="${apmir}" cmdfound --channel "${realch}/alpine" index; PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/hcal" CMDFOUND_ALPINE_REGISTRY="${apreg}" cmdfound --channel "${realch}/alpine" probe figlet)"
+apclean="$(PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/hcal" CMDFOUND_ALPINE_MIRROR="${apmir}" cmdfound --channel "${realch}/distro.d/apk.d/alpine" index; PATH="${apbin}:${PATH}" CMDFOUND_HOME="$(pwd)/hcal" CMDFOUND_ALPINE_REGISTRY="${apreg}" cmdfound --channel "${realch}/distro.d/apk.d/alpine" probe figlet)"
 printf '%s\n' "${apclean}" | grep '^image=docker.io/library/alpine:3.22@sha256:' >/dev/null
 env ${webenv} PATH="${apbin}:$(pwd)/webcurl:${PATH}" ${hostenv} FAKE_WEB_ENV="$(pwd)/webseen" CMDFOUND_CHANNELS="${realch}" CMDFOUND_HOME="$(pwd)/hhal" CMDFOUND_ALPINE_MIRROR=http://apk.invalid cmdfound -i alpine 2>&1 | grep 'alpine: 142 packages' >/dev/null
 cmp hcal/channels/alpine/index/alpine.tsv hhal/channels/alpine/index/alpine.tsv
-test X"$(env ${webenv} PATH="${apbin}:$(pwd)/webcurl:${PATH}" ${hostenv} CMDFOUND_HOME="$(pwd)/hhal" CMDFOUND_ALPINE_REGISTRY=http://reg.invalid cmdfound --channel "${realch}/alpine" probe figlet)" = X"$(printf '%s\n' "${apclean}" | sed -n '/^version=/,$p')"
-test X"$(env ${wgetenv} PATH="${apbin}:${toolsdir}:${nocurl}:$(pwd)/webwget" ${hostenv} CMDFOUND_HOME="$(pwd)/hwal" CMDFOUND_ALPINE_MIRROR=http://apk.invalid cmdfound --channel "${realch}/alpine" index; env ${wgetenv} PATH="${apbin}:${toolsdir}:${nocurl}:$(pwd)/webwget" ${hostenv} CMDFOUND_HOME="$(pwd)/hwal" CMDFOUND_ALPINE_REGISTRY=http://reg.invalid cmdfound --channel "${realch}/alpine" probe figlet)" = X"${apclean}"
+test X"$(env ${webenv} PATH="${apbin}:$(pwd)/webcurl:${PATH}" ${hostenv} CMDFOUND_HOME="$(pwd)/hhal" CMDFOUND_ALPINE_REGISTRY=http://reg.invalid cmdfound --channel "${realch}/distro.d/apk.d/alpine" probe figlet)" = X"$(printf '%s\n' "${apclean}" | sed -n '/^version=/,$p')"
+test X"$(env ${wgetenv} PATH="${apbin}:${toolsdir}:${nocurl}:$(pwd)/webwget" ${hostenv} CMDFOUND_HOME="$(pwd)/hwal" CMDFOUND_ALPINE_MIRROR=http://apk.invalid cmdfound --channel "${realch}/distro.d/apk.d/alpine" index; env ${wgetenv} PATH="${apbin}:${toolsdir}:${nocurl}:$(pwd)/webwget" ${hostenv} CMDFOUND_HOME="$(pwd)/hwal" CMDFOUND_ALPINE_REGISTRY=http://reg.invalid cmdfound --channel "${realch}/distro.d/apk.d/alpine" probe figlet)" = X"${apclean}"
 bienv="CMDFOUND_NAMED=binstall CMDFOUND_CRATES_INDEX=http://index.invalid/idx CMDFOUND_QUICKINSTALL=http://qi.invalid/dl CMDFOUND_CRATES_DL=http://dl.invalid/crates CMDFOUND_BINSTALL_RELEASES=http://rel.invalid/r CMDFOUND_BINSTALL_GITHUB=http://gh.invalid"
 biclean="$(for c in "probe bitool" "probe biauthor" "probe binone" "probe cargo-binstall" "locate cargo-binstall 9.9.10"; do PATH="${biplat}:${PATH}" CMDFOUND_NAMED=binstall CMDFOUND_HOME="$(pwd)/hcbi" cmdfound --channel "${bidir}" ${c}; done | grep -v '^url=')"
 printf '%s\n' "${biclean}" | grep -x 'requires=binstall:cargo-binstall' >/dev/null
@@ -2111,10 +2569,10 @@ test X"$(env ${bbenv} PATH="${bbpath}" ${hostenv} CMDFOUND_HOME="$(pwd)/hbbgh" c
 test X"$(env ${wgetenv} ${hostenv} CMDFOUND_HOME="$(pwd)/hwgh" cmdfound --channel "${realch}/github" probe acme/webxz | awk -F= '$1 == "version" {print $2}')" = X"1.0"
 test X"$(env ${bbenv} PATH="${bbpath}" ${hostenv} CMDFOUND_HOME="$(pwd)/hbbaq" cmdfound --channel "${realch}/aqua" index)" = X"${aqclean}"
 test X"$(env ${bbenv} PATH="${bbpath}" ${hostenv} CMDFOUND_HOME="$(pwd)/hbbam" CMDFOUND_AM_REPO=http://am.invalid cmdfound --channel "${realch}/am" probe APP-MANAGER)" = X"$(printf '%s\n' "${amclean}" | sed -n '/^version=/,$p')"
-test X"$(env ${bbenv} PATH="${bbpath}" ${hostenv} CMDFOUND_HOME="$(pwd)/hbbpx" CMDFOUND_PKGX_DIST=http://dist.invalid cmdfound --channel "${realch}/pkgx" index)" = X"$(printf '%s\n' "${pxclean}" | head -3)"
+test X"$(env ${bbenv} PATH="${bbpath}" ${hostenv} CMDFOUND_HOME="$(pwd)/hbbpx" CMDFOUND_PKGX_DIST=http://dist.invalid cmdfound --channel "${realch}/pkgx" index)" = X"$(printf '%s\n' "${pxclean}" | head -4)"
 test X"$(env ${bbenv} PATH="${bbpath}" ${hostenv} ${cfenv} CMDFOUND_HOME="$(pwd)/hbbcf" cmdfound --channel "${cfdir}" probe micromamba)" = X"$(printf '%s\n' "${cfclean}" | sed -n '/^version=/,/^bytes=/p')"
 test X"$(env ${bbenv} PATH="$(pwd)/npneeds:${bbpath}" ${hostenv} CMDFOUND_HOME="$(pwd)/hbbnp" CMDFOUND_NIX_PORTABLE_CHANNEL=http://nix.invalid/channel cmdfound --channel "${realch}/nix-portable" index)" = X"${npclean}"
-test X"$(env ${bbenv} PATH="${apbin}:${bbpath}" ${hostenv} CMDFOUND_HOME="$(pwd)/hbbal" CMDFOUND_ALPINE_MIRROR=http://apk.invalid cmdfound --channel "${realch}/alpine" index)" = X"$(printf '%s\n' "${apclean}" | sed '/^version=/,$d')"
+test X"$(env ${bbenv} PATH="${apbin}:${bbpath}" ${hostenv} CMDFOUND_HOME="$(pwd)/hbbal" CMDFOUND_ALPINE_MIRROR=http://apk.invalid cmdfound --channel "${realch}/distro.d/apk.d/alpine" index)" = X"$(printf '%s\n' "${apclean}" | sed '/^version=/,$d')"
 test X"$(env ${bbenv} PATH="$(pwd)/biplat2:${bbpath}" ${hostenv} ${bienv} CMDFOUND_HOME="$(pwd)/hbbbi" cmdfound --channel "${bidir}" locate cargo-binstall 9.9.10 | grep -v '^url=')" = X"$(printf '%s\n' "${biclean}" | tail -3)"
 #and a GNU wget older than 1.17 refuses --no-hsts: its --help names no HSTS,
 #and it is given --no-config alone
@@ -2222,7 +2680,7 @@ env CMDFOUND_HOME="$(pwd)/am" CMDFOUND_REQUIRED="${aqtool}" FAKE_AQUA_ASSET="jqx
 #AM offers what the list in the user's APPSLISTDB names and installs with the
 #scripts in their APPSDB; with neither exported, AM is handed this repository's
 mkdir -p amdb/x86_64 && { i=0; while [ ${i} -lt 110 ]; do printf '◆ amdbfill%s : filler\n' "${i}"; i=$((i+1)); done; printf '%s\n' '◆ amdbtool : only in this database'; } > amdb/list && : > amdb/x86_64/amdbtool
-test X"$(APPSLISTDB="$(pwd)/amdb/list" CMDFOUND_HOME="$(pwd)/hamdb" cmdfound --channel "${realch}/am" index | head -1)" = X"packages=111"
+test X"$(APPSLISTDB="$(pwd)/amdb/list" CMDFOUND_HOME="$(pwd)/hamdb" cmdfound --channel "${realch}/am" index | grep '^packages=')" = X"packages=111"
 test X"$(APPSLISTDB="$(pwd)/amdb/list" CMDFOUND_HOME="$(pwd)/hamdb" cmdfound --channel "${realch}/am" probe amdbtool | tr '\n' ' ')" = X"version=latest requires=am:APP-MANAGER "
 test X"$(APPSDB="$(pwd)/amdb/x86_64" CMDFOUND_HOME="$(pwd)/hamdb" cmdfound --channel "${realch}/am" locate amdbtool latest | head -1)" = X"url=$(pwd)/amdb/x86_64/amdbtool"
 #and AM's curl reads no configuration of the user's, CURL_HOME's included
@@ -2235,7 +2693,7 @@ amenvlog="$(pwd)/amenvlog"; amtoolcopy="$(pwd)/amtoolcopy"; cp ../cmdfound.d/fak
 #no root. Everything udocker is here is a stand-in, independent of this
 #machine. HOME is a directory made here, holding a docker login with fake
 #tokens, and the tests look for anything written under it
-PATH="$(cd ../.. && pwd):${PATH}"; export PATH
+PATH="$(pwd)/inbin:${PATH}"; export PATH
 unset http_proxy https_proxy no_proxy all_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY SSL_CERT_FILE CURL_CA_BUNDLE DOCKER_CONFIG UDOCKER_TARBALL UDOCKER_LOGLEVEL UDOCKER_DIR UDOCKER_KEYSTORE UDOCKER_TMP UDOCKER_BIN UDOCKER_LIB UDOCKER_DOC UDOCKER_REPOS UDOCKER_LAYERS UDOCKER_CONTAINERS CURL_HOME PROOT_TMP_DIR
 udt="$(pwd)"; udch="${udt}/udch"; udh="${udt}/udh"; udhome="${udt}/udhome"; udbin="${udt}/udbin"; udlog="${udt}/udlog"; udpy="${udt}/udpy"; udc="${udt}/udh/channels/udocker"; udid="$(id -u)"
 udhex="0000000000000000000000000000000000000000000000000000000000000000"; udimg="fake.invalid/base:1@sha256:${udhex}"
@@ -2297,7 +2755,9 @@ test X"$(grep -c catalog udout)" = X"0"
 test X"$(tr '\n' '|' < udout)" = X"fcname ran in udocker|two words|"
 test X"$(grep -e ' -> ' -e '^            ' uderr | tr '\n' '|')" = X"cmdfound: fcname 1.0-r0 -> udocker:fakecat/fcname  about 4.9 KB, <0.01 s  [via fakecat]  dockerized|            first tool udocker:udocker 9.9.9, $(awk -v b="${udsize}" "${udhuman}"), <0.01 s, fetched once and kept up to date [verified]|            first setup udocker-englib-1.2.11, $(awk -v b="${udeng}" "${udhuman}"), <0.01 s, once [none]|            first image fake.invalid/base:1, 2.9 KB, <0.01 s, once [via udocker]|            total about $(awk -v b="$((5000 + udsize + udeng + 3000))" "${udhuman}"), ~0.01 s|"
 test X"$(awk '/ \| HOME/ {print $1}' udlog | tr '\n' ' ')" = X"version install pull create setup run run run "
-test X"$(grep -c " | HOME=${udc}/home XDG_CONFIG_HOME=${udc}/home/.config CURL_HOME unset UDOCKER_DIR=${udc}/ud UDOCKER_KEYSTORE=${udc}/ud/keystore UDOCKER_TMP=${udc}/tmp XDG_RUNTIME_DIR=${udc}/xdg UDOCKER_TARBALL[ =].* UDOCKER_LOGLEVEL=2 UDOCKER_BIN unset UDOCKER_LIB unset UDOCKER_DOC unset UDOCKER_REPOS unset UDOCKER_LAYERS unset UDOCKER_CONTAINERS unset PROOT_TMP_DIR unset http_proxy=http://proxy.invalid:3128 SSL_CERT_FILE=${udt}/udca quiet=[01] allow_root=0 path=" udlog)" = X"8"
+#root is let in only by --allow-root, which udocker asks of root alone
+udroot="0"; [ X"$(id -u)" != X"0" ] || udroot="1"
+test X"$(grep -c " | HOME=${udc}/home XDG_CONFIG_HOME=${udc}/home/.config CURL_HOME unset UDOCKER_DIR=${udc}/ud UDOCKER_KEYSTORE=${udc}/ud/keystore UDOCKER_TMP=${udc}/tmp XDG_RUNTIME_DIR=${udc}/xdg UDOCKER_TARBALL[ =].* UDOCKER_LOGLEVEL=2 UDOCKER_BIN unset UDOCKER_LIB unset UDOCKER_DOC unset UDOCKER_REPOS unset UDOCKER_LAYERS unset UDOCKER_CONTAINERS unset PROOT_TMP_DIR unset http_proxy=http://proxy.invalid:3128 SSL_CERT_FILE=${udt}/udca quiet=[01] allow_root=${udroot} path=" udlog)" = X"8"
 test X"$(awk '/ \| HOME/ {for (i = 1; i <= NF; i++) if ($i ~ /^UDOCKER_TARBALL/) printf("%s%s ", $1, ($i == "UDOCKER_TARBALL" ? "-unset" : ""))}' udlog)" = X"version-unset install-unset pull create setup run run run "
 grep -Fx 'installed from '"${udt}"'/udengines.tar.gz' udlog >/dev/null
 test X"$(grep -c "^pull fake.invalid/base:sha256:${udhex} |" udlog)" = X"1"
@@ -2413,8 +2873,8 @@ grep "^cmdfound: udocker goes without it; slowbox:fakecat/fcname instead$" uderr
 #depends on this machine's docker, ids or sockets
 unset SSH_AUTH_SOCK http_proxy https_proxy no_proxy all_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY SSL_CERT_FILE CURL_CA_BUNDLE DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG
 for dkv in $(env | awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=\// {print $1}'); do eval "[ -S \"\${${dkv}}\" ]" && unset "${dkv}"; done; :
-mkdir -p dkch dkh/proj dkh/.docker dktmp dkempty dkroot && dkd="sha256:$(sha256sum apreg/v2/library/alpine/manifests/3.22 | awk '{print $1}')" && dkreal="$(cd ../.. && pwd)/cmdfound.d" && ln -s "${dkreal}/alpine" dkch/alpine && ln -s "${dkreal}/docker" dkch/docker
-dktools="$(cd ../.. && pwd -P)"; dkchd="$(pwd -P)/dkch"; dkh="$(pwd -P)/dkh"; dksr="$(pwd -P)/dksr"; dkroot="$(pwd -P)/dkroot"; dklog="$(pwd -P)/dklog"; dkprog="$(pwd -P)/dkprog"; dktmp="$(pwd -P)/dktmp"; dkempty="$(pwd -P)/dkempty"; dkout="$(pwd -P)/dkout"; dkerr="$(pwd -P)/dkerr"; dkca="$(pwd -P)/dkca"; dkimg="docker.io/library/alpine:3.22@${dkd}"; dkbase="docker.io/library/alpine@${dkd}"
+mkdir -p dkch dkh/proj dkh/.docker dktmp dkempty dkroot && dkd="sha256:$(sha256sum apreg/v2/library/alpine/manifests/3.22 | awk '{print $1}')" && dkreal="$(cd ../.. && pwd)/cmdfound.d" && mkdir -p dkch/distro.d/apk.d && ln -s "${dkreal}/distro" dkch/distro && ln -s "${dkreal}/distro.d/apk" dkch/distro.d/apk && ln -s "${dkreal}/distro.d/apk.d/alpine" dkch/distro.d/apk.d/alpine && ln -s "${dkreal}/docker" dkch/docker
+dktools="$(pwd -P)/inbin"; dkchd="$(pwd -P)/dkch"; dkh="$(pwd -P)/dkh"; dksr="$(pwd -P)/dksr"; dkroot="$(pwd -P)/dkroot"; dklog="$(pwd -P)/dklog"; dkprog="$(pwd -P)/dkprog"; dktmp="$(pwd -P)/dktmp"; dkempty="$(pwd -P)/dkempty"; dkout="$(pwd -P)/dkout"; dkerr="$(pwd -P)/dkerr"; dkca="$(pwd -P)/dkca"; dkimg="docker.io/library/alpine:3.22@${dkd}"; dkbase="docker.io/library/alpine@${dkd}"
 #the pid namespace build containers are named for, read as the channel reads it
 dkns="$(readlink /proc/self/ns/pid 2>/dev/null)"; case "${dkns}" in "pid:["*"]") dkns="${dkns#pid:?}"; dkns="${dkns%?}" ;; *) dkns="none" ;; esac; dkotherns="0"
 dkrun() { ({ set +x; } 2>/dev/null; PATH="${dktools}:${PATH}"; HOME="${dkh}"; DOCKER_CONFIG="${dkh}/.docker"; DOCKER_HOST="unix://${dkroot}/docker.sock"; TMPDIR="${dktmp}"; CMDFOUND_HOME="${dksr}"; CMDFOUND_CHANNELS="${dkchd}"; FAKE_DOCKER_ROOT="${dkroot}"; FAKE_DOCKER_LOG="${dklog}"; FAKE_DOCKER_PROGRAM="${dkprog}"; export HOME DOCKER_CONFIG DOCKER_HOST TMPDIR CMDFOUND_HOME CMDFOUND_CHANNELS FAKE_DOCKER_ROOT FAKE_DOCKER_LOG FAKE_DOCKER_PROGRAM; exec "$@"); }
@@ -2569,9 +3029,10 @@ test X"$(cat dkout)" = X"failed=installing c++y 1.0-r0 in docker.io/library/alpi
 #and a signal to the whole obtain while the install runs ends it at once and
 #removes the build container. It is TERM here: the runner starts a job in the
 #background with SIGINT ignored; INT takes the same way through the traps
-{ ! command -v setsid >/dev/null 2>&1; } || { rm -f dkint; dkrun env FAKE_DOCKER_BUILD_WAIT=30 CMDFOUND_HOME="$(pwd -P)/dksr4" CMDFOUND_RECIPE="$(printf '%s\n' "image=${dkimg}" 'install=apk add c++y=1.0-r0' 'bin=c++y')" setsid -w sh -c 'printf "%s" "$$" > dkint; exec cmdfound --channel "${1}" obtain alpine/c++y 1.0-r0 c++y' sh "${dkchd}/docker" > dkout 2> /dev/null < /dev/null & dkjob="${!}"; }
-{ ! command -v setsid >/dev/null 2>&1; } || { i=0; while [ "${i}" -lt 200 ] && ! { [ -s dkint ] && ls dkroot/containers/*/started >/dev/null 2>&1; }; do sleep 0.1; i=$((i + 1)); done; kill -TERM "-$(cat dkint)"; i=0; while [ "${i}" -lt 100 ] && kill -0 "${dkjob}" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done; ! kill -0 "${dkjob}" 2>/dev/null; }
-{ ! command -v setsid >/dev/null 2>&1; } || { wait "${dkjob}"; test X"${?}" = X"143" && test X"$(ls dkroot/containers)" = X"" && test X"$(ls -A dksr4/channels/docker/tmp)" = X"" && test ! -e dksr4/channels/docker/images && test ! -e dksr4/channels/docker/run/alpine/c++y && test ! -s dkout; }
+#setsid -w is asked for itself: busybox's setsid has no -w and does not wait
+{ ! setsid -w true >/dev/null 2>&1; } || { rm -f dkint; dkrun env FAKE_DOCKER_BUILD_WAIT=30 CMDFOUND_HOME="$(pwd -P)/dksr4" CMDFOUND_RECIPE="$(printf '%s\n' "image=${dkimg}" 'install=apk add c++y=1.0-r0' 'bin=c++y')" setsid -w sh -c 'printf "%s" "$$" > dkint; exec cmdfound --channel "${1}" obtain alpine/c++y 1.0-r0 c++y' sh "${dkchd}/docker" > dkout 2> /dev/null < /dev/null & dkjob="${!}"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { i=0; while [ "${i}" -lt 200 ] && ! { [ -s dkint ] && ls dkroot/containers/*/started >/dev/null 2>&1; }; do sleep 0.1; i=$((i + 1)); done; kill -TERM "-$(cat dkint)"; i=0; while [ "${i}" -lt 100 ] && kill -0 "${dkjob}" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done; ! kill -0 "${dkjob}" 2>/dev/null; }
+{ ! setsid -w true >/dev/null 2>&1; } || { wait "${dkjob}"; test X"${?}" = X"143" && test X"$(ls dkroot/containers)" = X"" && test X"$(ls -A dksr4/channels/docker/tmp)" = X"" && test ! -e dksr4/channels/docker/images && test ! -e dksr4/channels/docker/run/alpine/c++y && test ! -s dkout; }
 #a home whose path would be code in a launcher is refused before docker is asked
 rm -f dklog
 dkrun env CMDFOUND_HOME="$(pwd -P)/dk\$q" CMDFOUND_RECIPE="$(printf '%s\n' "image=${dkimg}" 'install=apk add c++x=1.0-r0' 'bin=c++x')" cmdfound --channel "${dkchd}/docker" obtain alpine/c++x 1.0-r0 c++x > dkout 2> /dev/null; test X"${?}" = X"1"
@@ -2672,10 +3133,10 @@ lkgone "${lkh}/locks" && test X"$(awk 'END {print NR}' "${lkl}/log")" = X"1"
 rm -f "${lkl}/go" "${lkl}/log" && rm -rf "${lkh}/channels/alpha" "${lkh}/cache"
 CMDFOUND_CHANNELS="${lkch}" CMDFOUND_HOME="${lkh}" cmdfound --yes mixed > "${lkl}/a.out" 2> "${lkl}/a.err" & lka="${!}"
 lkwait "${lkl}/log" "locate mixed"
-{ ! command -v setsid >/dev/null 2>&1; } || { rm -f "${lkl}/w.pid"; CMDFOUND_CHANNELS="${lkch}" CMDFOUND_HOME="${lkh}" setsid -w sh -c 'printf "%s" "$$" > "${1}"; exec cmdfound --yes mixed' sh "${lkl}/w.pid" > "${lkl}/w.out" 2> "${lkl}/w.err" < /dev/null & lkw="${!}"; }
-{ ! command -v setsid >/dev/null 2>&1; } || { lkwait "${lkl}/w.err" "is being installed by pid ${lka}, waiting for it" && kill -TERM "-$(cat "${lkl}/w.pid")"; }
-{ ! command -v setsid >/dev/null 2>&1; } || { wait "${lkw}"; test X"${?}" = X"143"; }
-{ ! command -v setsid >/dev/null 2>&1; } || { test ! -s "${lkl}/w.out" && test X"$(cat "${lkh}/locks/alpha_mixed_1.0/pid")" = X"${lka}"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { rm -f "${lkl}/w.pid"; CMDFOUND_CHANNELS="${lkch}" CMDFOUND_HOME="${lkh}" setsid -w sh -c 'printf "%s" "$$" > "${1}"; exec cmdfound --yes mixed' sh "${lkl}/w.pid" > "${lkl}/w.out" 2> "${lkl}/w.err" < /dev/null & lkw="${!}"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { lkwait "${lkl}/w.err" "is being installed by pid ${lka}, waiting for it" && kill -TERM "-$(cat "${lkl}/w.pid")"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { wait "${lkw}"; test X"${?}" = X"143"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { test ! -s "${lkl}/w.out" && test X"$(cat "${lkh}/locks/alpha_mixed_1.0/pid")" = X"${lka}"; }
 : > "${lkl}/go"
 wait "${lka}"; test X"${?}" = X"0"
 test X"$(cat "${lkl}/a.out")" = X"alpha" && test X"$(awk 'END {print NR}' "${lkl}/log")" = X"1"
@@ -2683,11 +3144,11 @@ lkgone "${lkh}/locks"
 #and the same signal to the run that holds the lock: the trap gives the lock
 #back however the run ends
 rm -f "${lkl}/go" "${lkl}/log" && rm -rf "${lkh}/channels/alpha" "${lkh}/cache"
-{ ! command -v setsid >/dev/null 2>&1; } || { rm -f "${lkl}/h.pid"; CMDFOUND_CHANNELS="${lkch}" CMDFOUND_HOME="${lkh}" setsid -w sh -c 'printf "%s" "$$" > "${1}"; exec cmdfound --yes mixed' sh "${lkl}/h.pid" > "${lkl}/h.out" 2> "${lkl}/h.err" < /dev/null & lkhd="${!}"; }
-{ ! command -v setsid >/dev/null 2>&1; } || { lkwait "${lkl}/log" "locate mixed" && test -d "${lkh}/locks/alpha_mixed_1.0" && kill -TERM "-$(cat "${lkl}/h.pid")"; }
-{ ! command -v setsid >/dev/null 2>&1; } || { wait "${lkhd}"; test X"${?}" = X"143"; }
-{ ! command -v setsid >/dev/null 2>&1; } || { lkgone "${lkh}/locks" && test ! -e "${lkh}/channels/alpha/by/mixed"; }
-{ ! command -v setsid >/dev/null 2>&1; } || { rm -f "${lkl}/log"; test X"$(FAKE_ALPHA_HOLD= CMDFOUND_CHANNELS="${lkch}" CMDFOUND_HOME="${lkh}" cmdfound --yes mixed 2>/dev/null)" = X"alpha"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { rm -f "${lkl}/h.pid"; CMDFOUND_CHANNELS="${lkch}" CMDFOUND_HOME="${lkh}" setsid -w sh -c 'printf "%s" "$$" > "${1}"; exec cmdfound --yes mixed' sh "${lkl}/h.pid" > "${lkl}/h.out" 2> "${lkl}/h.err" < /dev/null & lkhd="${!}"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { lkwait "${lkl}/log" "locate mixed" && test -d "${lkh}/locks/alpha_mixed_1.0" && kill -TERM "-$(cat "${lkl}/h.pid")"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { wait "${lkhd}"; test X"${?}" = X"143"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { lkgone "${lkh}/locks" && test ! -e "${lkh}/channels/alpha/by/mixed"; }
+{ ! setsid -w true >/dev/null 2>&1; } || { rm -f "${lkl}/log"; test X"$(FAKE_ALPHA_HOLD= CMDFOUND_CHANNELS="${lkch}" CMDFOUND_HOME="${lkh}" cmdfound --yes mixed 2>/dev/null)" = X"alpha"; }
 #a run that fails leaves no lock either: liar publishes a checksum that does not
 #match, nothing is placed, and the next run has nothing to wait for
 rm -f "${lkl}/go" "${lkl}/log" && rm -rf "${lkh}/channels/liar" "${lkh}/cache"
@@ -2735,7 +3196,31 @@ test -d "${lkh}/locks/alpha_mixed_1.0" && test -d "${lkh}"
 : > "${lkl}/go"
 wait "${lka}"; test X"${?}" = X"0"
 CMDFOUND_CHANNELS="${lkch}" CMDFOUND_HOME="${lkh}" cmdfound --yes --purge > /dev/null 2>&1; test X"${?}" = X"0"
-test ! -e "${lkh}"
+#this once found the home there again, 1 run in about 20, never reproduced:
+#what is in it and what still runs go to the trace if it happens again
+test ! -e "${lkh}" || { find "${lkh}"; ps -eo pid,pgid,etimes,args | grep -E 'cmdfound|alpha' | grep -v grep; false; }
 #and nothing this section set is left set for whatever comes after it
 unset FAKE_ALPHA_LOG FAKE_ALPHA_HOLD
+#@section{bundle}
+#the cmdfound published is ./build's output, and the one here is current
+../../build "$(pwd)/fresh" && cmp -s fresh ../../cmdfound
+#with no cmdfound.d beside it and none named, it writes the channels it
+#carries out once under its home, each as it is in cmdfound.d
+mkdir -p bun && cp ../../cmdfound bun/cmdfound
+test X"$(unset CMDFOUND_CHANNELS; CMDFOUND_HOME="$(pwd)/bunh" bun/cmdfound --channel github meta | head -1)" = X"aliases=gh"
+for f in ../../cmdfound.d/* ../../cmdfound.d/*.d/* ../../cmdfound.d/*.d/*.d/*; do [ -f "${f}" ] || continue; cmp -s "${f}" bunh/bundle/*/"${f#../../cmdfound.d/}" || exit 1; done
+test X"$(ls bunh/bundle | wc -l | tr -d ' ')" = X"1"
+#cmdfound.in carries none, and reads the cmdfound.d beside it
+grep -q '^BUNDLE_ID=""$' ../../cmdfound.in
+#the version is the date the sources were first built, which --update goes
+#by: cmdfound.in has none, the build writes it in with the sources' sum beside
+#it, a build of the same sources keeps the date, and other sources get today's
+grep -q '^VERSION=""$' ../../cmdfound.in
+grep -qE '^VERSION="[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[0-9]{2}:[0-9]{2}" #sources [0-9a-f]{12}$' fresh
+test X"$(grep '^VERSION=' fresh)" = X"$(grep '^VERSION=' ../../cmdfound)"
+mkdir -p verb && cp ../../build ../../cmdfound.in verb/ && cp -R ../../cmdfound.d verb/ && printf '%s\n' '#one more line' >> verb/cmdfound.in && verb/build "$(pwd)/verb/out"
+test X"$(sed -n 's/^VERSION=.* #sources //p' verb/out)" != X"$(sed -n 's/^VERSION=.* #sources //p' fresh)"
+test X"$(sed -n 's/^VERSION="\([^-]*\)-.*/\1/p' verb/out)" = X"$(date -u +%Y.%m.%d)"
+#and it carries no source ruled out: cmdfound.d/discarded/ holds notes for whoever adds a channel
+for f in ../../cmdfound.d/discarded/*; do test ! -e bunh/bundle/*/"${f##*/}" || exit 1; done
 @end

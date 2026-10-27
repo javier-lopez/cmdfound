@@ -1,0 +1,3 @@
+#description: backbox - BackBox Linux, a Launchpad PPA over Ubuntu
+#decided: 2026-10-26
+#why: 63 packages, 25 of them metas, whose tools Ubuntu or nix already have; a PPA has no command index

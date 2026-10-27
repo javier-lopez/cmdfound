@@ -1,0 +1,3 @@
+#description: exegol - Exegol, pentest environments as docker images
+#decided: 2026-10-26
+#why: no command index, images of 7-21 GB installed whole, unsigned; the docker channel runs nwodtuhs/exegol when named

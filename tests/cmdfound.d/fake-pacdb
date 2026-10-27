@@ -1,0 +1,33 @@
+#!/bin/sh
+#writes a pacman database for the tests. $1 => the file, $2 => db or files,
+#$3 => desc-first or files-first, the order of each package's two members, as
+#Arch and BlackArch write them, $4 => zstd to compress it as Chaotic-AUR does,
+#gzip otherwise. A package a line on stdin:
+#    name|version|csize|depends|provides|files|description, lists comma separated
+out="${1}"; kind="${2}"; order="${3}"; comp="${4:-gzip}"
+case "${out}" in /*) ;; *) out="$(pwd)/${out}" ;; esac
+work="${out}.d"
+rm -rf "${work}" && mkdir -p "${work}" || exit 1
+while IFS='|' read -r name ver csize deps provs files desc; do
+    d="${work}/${name}-${ver}"; mkdir -p "${d}" || exit 1
+    {
+        printf '%%FILENAME%%\n%s-%s-x86_64.pkg.tar.zst\n\n%%NAME%%\n%s\n\n%%VERSION%%\n%s\n\n' "${name}" "${ver}" "${name}" "${ver}"
+        printf '%%DESC%%\n%s\n\n%%CSIZE%%\n%s\n\n' "${desc}" "${csize}"
+        [ -n "${deps}" ] && printf '%%DEPENDS%%\n%s\n\n' "$(printf '%s' "${deps}" | tr ',' '\n')"
+        [ -n "${provs}" ] && printf '%%PROVIDES%%\n%s\n\n' "$(printf '%s' "${provs}" | tr ',' '\n')"
+    } > "${d}/desc"
+    if [ X"${kind}" = X"files" ]; then
+        printf '%%FILES%%\n%s\n' "$(printf '%s' "${files}" | tr ',' '\n')" > "${d}/files"
+    fi
+done
+#the members alone, in the order asked for: tar keeps the order it is given
+(cd "${work}" && for d in *; do
+    if [ X"${order}" = X"files-first" ] && [ -f "${d}/files" ]; then
+        printf '%s\n' "${d}/files" "${d}/desc"
+    else
+        printf '%s\n' "${d}/desc"
+        if [ -f "${d}/files" ]; then printf '%s\n' "${d}/files"; fi
+    fi
+done) > "${work}.list" && (cd "${work}" && tar -cf - $(cat "${work}.list")) | {
+    if [ X"${comp}" = X"zstd" ]; then zstd -qc; else gzip -nc; fi
+} > "${out}" && rm -rf "${work}" "${work}.list"

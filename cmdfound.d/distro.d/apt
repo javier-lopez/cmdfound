@@ -1,0 +1,154 @@
+#description: cmdfound library - a catalog of deb packages, installed by apt-get inside the distro's image
+#usage: loaded by distro after a row of distro.d/apt.d/, which sets DISTRO,
+#       DISTRO_RELEASE, ARCHES, MIRROR, SUITES, REPOS, KEYRING, BASE, IMAGE,
+#       REGISTRY, REPOSITORY and TAG
+FORMAT="apt"
+NEEDS="xz"
+INSTALLER="apt-get"
+
+_files() {
+    #what each suite is read from, a "suite repo kind path" line each, Commands first
+    for _fi__kind in cnf pkg; do
+        for _fi__suite in ${SUITES}; do
+            for _fi__repo in ${REPOS}; do
+                case "${_fi__kind}" in
+                    cnf) printf "%s %s cnf %s\\n" "${_fi__suite}" "${_fi__repo}" "${_fi__repo}/cnf/Commands-${arch}.xz" ;;
+                    pkg) printf "%s %s pkg %s\\n" "${_fi__suite}" "${_fi__repo}" "${_fi__repo}/binary-${arch}/Packages.xz" ;;
+                esac
+            done
+        done
+    done
+}
+
+_index_bytes() {
+    {
+        for _ib__suite in ${SUITES}; do
+            printf "%s\\n" "${MIRROR}/dists/${_ib__suite}/InRelease"
+        done
+        _files | while read -r _ib__suite _ib__repo _ib__kind _ib__path; do
+            printf "%s\\n" "${MIRROR}/dists/${_ib__suite}/${_ib__path}"
+        done
+    } | _heads_bytes
+}
+
+_fetch() {
+    #InRelease's signature is apt's to check, in the image. Here each file is
+    #held to the sum InRelease lists
+    for _fe__suite in ${SUITES}; do
+        _fe__rel="${CH}/index/${_fe__suite}.InRelease"
+        _api_fetcher_answered "${MIRROR}/dists/${_fe__suite}/InRelease" "${_fe__rel}.$$"
+        case "${?}" in
+            0) mv "${_fe__rel}.$$" "${_fe__rel}" || { rm -f "${_fe__rel}.$$"; exit 1; } ;;
+            1) _api_answer_unreachable "there is no ${_fe__suite} suite for ${DISTRO_RELEASE} at ${MIRROR}" ;;
+            *) _api_answer_unreachable "${DISTRO}'s ${_fe__suite} InRelease could not be downloaded" ;;
+        esac
+        bytes="$((bytes + $(wc -c < "${_fe__rel}")))"
+    done
+    #a here-document and not a pipe: the loop exits, and adds to bytes
+    _fe__files="$(_files)"
+    while read -r _fe__suite _fe__repo _fe__kind _fe__path; do
+        _fe__rel="${CH}/index/${_fe__suite}.InRelease"
+        _sum_in "${_fe__rel}" "${_fe__path}" || \
+            _api_answer_unreachable "${DISTRO}'s ${_fe__suite} InRelease lists no sha256 or sha512 of ${_fe__path}"
+        _fe__url="${MIRROR}/dists/${_fe__suite}/${_fe__path}"
+        #by its hash, when the suite says it can: a mirror that is being
+        #updated then serves the file InRelease names, or none
+        if grep -x 'Acquire-By-Hash: yes' "${_fe__rel}" >/dev/null 2>&1; then
+            case "${_sum_in__out%% *}" in
+                sha256) _fe__url="${MIRROR}/dists/${_fe__suite}/${_fe__path%/*}/by-hash/SHA256/${_sum_in__out#* }" ;;
+                sha512) _fe__url="${MIRROR}/dists/${_fe__suite}/${_fe__path%/*}/by-hash/SHA512/${_sum_in__out#* }" ;;
+            esac
+        fi
+        _catalog_file "${_fe__url}" "${CH}/index/${_fe__suite}.${_fe__repo}.${_fe__kind}-${arch}.xz" \
+            "${DISTRO}'s ${_fe__suite} ${_fe__path}" "${_sum_in__out}" "its InRelease"
+    done <<EOF2
+${_fe__files}
+EOF2
+}
+
+_rows() {
+    #the rows of every Commands and Packages file, for _priced, each read after
+    #a line "@@cmdfound cnf|pkg REPO": the Commands of every suite, then their
+    #Packages, each kind in SUITES' order
+    #    name: figlet  commands: figlet,showfigfonts  =>  cmd  figlet  figlet
+    #    Package: figlet  Version: 2.2.5-3.1  Size: 137982  Depends: libc6 (>= 2.38) | libc7
+    #                                         =>  pkg  figlet  2.2.5-3.1  137982  universe  ...
+    #                                             dep  figlet  libc6|libc7
+    #
+    #A later suite's stanza replaces an earlier one's: -updates is newer than
+    #the release, and apt installs the newest. The end is said only once all
+    #of it was unpacked: nothing is written without it
+    _files | {
+        while read -r _ro__suite _ro__repo _ro__kind _ro__path; do
+            printf "@@cmdfound %s %s\\n" "${_ro__kind}" "${_ro__repo}"
+            _unpacked "${CH}/index/${_ro__suite}.${_ro__repo}.${_ro__kind}-${arch}.xz" || exit 1
+        done
+        printf "%s\\n" "@@cmdfound end"
+    } 2>/dev/null | LC_ALL=C awk '
+    function flush() {
+        if (kind == "cnf" && name != "") cmds[name] = commands
+        if (kind == "pkg" && name != "" && ver != "") {
+            if (!((name) in debver)) order[++npkg] = name
+            debver[name] = ver
+            if (size !~ /^[0-9]+$/) size = 0
+            sz[name] = size; repo[name] = comp
+            gsub(/\t/, " ", desc); about[name] = desc
+            prov[name] = provides; deps[name] = depends (depends != "" && predepends != "" ? ", " : "") predepends
+        }
+        name = ""; ver = ""; size = ""; desc = ""; commands = ""; provides = ""; depends = ""; predepends = ""
+    }
+    #what a relation names, its version and architecture dropped
+    #    libc6 (>= 2.38)  =>  libc6      python3:any  =>  python3
+    function bare(t) {
+        sub(/\(.*$/, "", t); sub(/:.*$/, "", t); gsub(/[ \t]/, "", t)
+        return t
+    }
+    /^@@cmdfound / { flush(); kind = $2; comp = $3; if (kind == "end") ended = 1; next }
+    { sub(/\r$/, "") }
+    $0 == "" { flush(); next }
+    /^[ \t]/ { next }
+    {
+        k = index($0, ":"); if (k == 0) next
+        f = substr($0, 1, k - 1); v = substr($0, k + 1); sub(/^[ \t]+/, "", v)
+        if (kind == "cnf") {
+            if (f == "name") name = v
+            else if (f == "commands") commands = v
+        } else if (f == "Package") name = v
+        else if (f == "Version") ver = v
+        else if (f == "Size") size = v
+        else if (f == "Description") desc = v
+        else if (f == "Provides") provides = v
+        else if (f == "Depends") depends = v
+        else if (f == "Pre-Depends") predepends = v
+    }
+    END {
+        if (!ended) exit 1
+        for (p in cmds) {
+            n = split(cmds[p], a, ",")
+            for (j = 1; j <= n; j++) { t = a[j]; gsub(/[ \t]/, "", t); if (t != "") printf("cmd\t%s\t%s\n", t, p) }
+        }
+        for (i = 1; i <= npkg; i++) {
+            p = order[i]
+            printf("pkg\t%s\t%s\t%s\t%s\t%s\n", p, debver[p], sz[p], repo[p], about[p])
+            n = split(prov[p], a, ",")
+            for (j = 1; j <= n; j++) { t = bare(a[j]); if (t != "") printf("prov\t%s\t%s\n", t, p) }
+            n = split(deps[p], a, ",")
+            for (j = 1; j <= n; j++) {
+                m = split(a[j], g, "|"); d = ""
+                for (k = 1; k <= m; k++) { t = bare(g[k]); if (t != "") d = d (d == "" ? "" : "|") t }
+                if (d != "") printf("dep\t%s\t%s\n", p, d)
+            }
+        }
+    }'
+}
+
+_install_line() {
+    #$1 => a package, $2 => its version as the archive writes it. The image's
+    #own sources set aside, as apk's are, for the suites indexed
+    _il__sources=""
+    for _il__suite in ${SUITES}; do
+        _il__sources="${_il__sources} 'deb [signed-by=${KEYRING}] ${MIRROR} ${_il__suite} ${REPOS}'"
+    done
+    _install_line__out="rm -f /etc/apt/sources.list /etc/apt/sources.list.d/* && printf '%s\\n'${_il__sources} > /etc/apt/sources.list.d/cmdfound.list && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${1}=${2} && rm -rf /var/lib/apt/lists/*"
+}
+

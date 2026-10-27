@@ -1,0 +1,3 @@
+#description: kali - Kali Linux, kali-rolling, apt
+#decided: 2026-10-26
+#why: no command index, only Contents (55 MB) for ~740 pentest commands; blackarch adds more for 17.6 MB

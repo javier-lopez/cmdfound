@@ -1,0 +1,3 @@
+#description: solus - Solus, eopkg
+#decided: 2026-10-26
+#why: no official image (only silkeh/solus, unofficial, amd64) and no file lists in its unsigned index: commands only from getsolus/packages' git pspecs; of 11,864, 1,035 are past nixpkgs, Ubuntu, Fedora, Arch, Tumbleweed, Alpine and ROSA, and about 60 are not benchmarks, duplicates, Solus tooling or reached elsewhere

@@ -5,7 +5,7 @@
 #the channels go after the end of the code, past an exit the shell never reads
 #beyond, so a run that does not need them does not parse them. _bundle_in reads
 #them back out of the file itself, once, when there is no cmdfound.d beside it.
-#Everything else is cmdfound.in as it is, with BUNDLE_ID filled in
+#Everything else is cmdfound.in as it is, with BUNDLE_ID and VERSION filled in
 
 MARK="__CMDFOUND_BUNDLE__"
 FILE="__CMDFOUND_FILE__"
@@ -26,35 +26,52 @@ _sum() {
 
 [ -f cmdfound.in ] || _die "no cmdfound.in here"
 grep -q '^BUNDLE_ID=""$' cmdfound.in || _die "cmdfound.in has no BUNDLE_ID=\"\" line"
+grep -q '^VERSION=""$' cmdfound.in || _die "cmdfound.in has no VERSION=\"\" line"
+
+#what is carried: cmdfound.d's files and those of its .d directories, as deep
+#as a family's rows (distro.d/rpm.d/fedora); discarded/ is notes, not carried
+_files() {
+    for f in cmdfound.d/* cmdfound.d/*.d/* cmdfound.d/*.d/*.d/*; do
+        [ -f "${f}" ] && printf "%s\n" "${f#cmdfound.d/}"
+    done
+}
 
 #a file ends where the next one starts, and awk gives back a final newline: a
 #channel without one would come out a byte longer
-for f in cmdfound.d/*; do
-    [ -f "${f}" ] || continue
-    case "${f}" in *.discarded) continue ;; esac
+for f in $(_files); do
+    f="cmdfound.d/${f}"
     grep -q -e "^${MARK}" -e "^${FILE} " "${f}" && _die "${f} has a line starting ${MARK} or ${FILE}"
     [ -s "${f}" ] && [ -z "$(tail -c1 "${f}" | tr -d '\n')" ] || _die "${f} does not end with a newline"
 done
 
-id="$(for f in cmdfound.d/*; do case "${f}" in *.discarded) continue ;; esac; [ -f "${f}" ] && printf "%s\\n" "${f##*/}" && cat "${f}"; done | _sum)"
+id="$(for f in $(_files); do printf "%s\\n" "${f}" && cat "cmdfound.d/${f}"; done | _sum)"
 [ -n "${id}" ] || _die "could not sum the channels"
 
-awk -v id="${id}" '
+#the version is the date its sources were first built, UTC, which --update
+#tells two cmdfounds apart by. The sources' sum rides beside it, so a build of
+#the same sources keeps the date the cmdfound here has and comes out the same
+sources="$({ cat cmdfound.in; printf "%s\\n" "${id}"; } | _sum | cut -c1-12)"
+[ -n "${sources}" ] || _die "could not sum cmdfound.in"
+version=""
+if [ -f cmdfound ] && [ X"$(sed -n 's/^VERSION="[^"]*" #sources \([0-9a-f]*\)$/\1/p' cmdfound | head -1)" = X"${sources}" ]; then
+    version="$(sed -n 's/^VERSION="\([^"]*\)" #sources [0-9a-f]*$/\1/p' cmdfound | head -1)"
+fi
+[ -n "${version}" ] || version="$(date -u +%Y.%m.%d-%H:%M)"
+
+awk -v id="${id}" -v version="${version}" -v sources="${sources}" '
     /^#\.\/build writes in the sum of the channels/ {
         print "#built by ./build from cmdfound.in and cmdfound.d: edit those, not this file"; next }
     $0 == "BUNDLE_ID=\"\"" { print "BUNDLE_ID=\"" id "\""; next }
+    $0 == "VERSION=\"\"" { print "VERSION=\"" version "\" #sources " sources; next }
     { print }
 ' cmdfound.in > "${out}.$$" || _die "could not write ${out}"
 
 {
     printf "%s\n" '' '#the channels this file carries, read by _bundle_in and never run: the code ends here' 'exit 1' "${MARK}"
-    for f in cmdfound.d/*; do
-        [ -f "${f}" ] || continue
-        #a name.discarded is a source ruled out, a note for whoever adds a channel
-        case "${f}" in *.discarded) continue ;; esac
-        mode="644"; [ -x "${f}" ] && mode="755"
-        printf "%s %s %s\n" "${FILE}" "${mode}" "${f##*/}"
-        cat "${f}"
+    for f in $(_files); do
+        mode="644"; [ -x "cmdfound.d/${f}" ] && mode="755"
+        printf "%s %s %s\n" "${FILE}" "${mode}" "${f}"
+        cat "cmdfound.d/${f}"
     done
 } >> "${out}.$$" || _die "could not write the channels"
 

@@ -7,12 +7,12 @@
 #cmdfound: jq 1.8.2 -> github:jqlang/jq  2.2 MB  [verified]  native
 #jq-1.8.2
 
-VERSION="2026.09.16-03:40"
+VERSION=""
 SRC_URL="https://raw.githubusercontent.com/javier-lopez/cmdfound/master/"
-#./build writes in the sum of the channels it carries; cmdfound.in carries none
-BUNDLE_ID=""
-
 COMMAND_NOT_FOUND="127"
+
+#required for ./build
+BUNDLE_ID=""
 
 _usage() { #reviewed
     printf "%s\\n" "Usage: ${PROGNAME} [OPTION]... [CHANNEL:]PACKAGE[@VERSION] [ARGUMENT]..."
@@ -80,7 +80,7 @@ _value() { #@frozen 2026-10-25 m@javier.io 2e226ed
 }
 
 _values() { #@frozen 2026-10-05 m@javier.io 2e226ed
-    #$1 => a key, $2 => key=value lines, and every value that key is given
+    #$1 => key, $2 => key=value lines, and every value that key is given
     #    _values once "${_rpr__rout}"  =>  setup|udocker-englib-1.2.11|9700000|none
     #                                      image|alpine:3.20|3400000|via udocker
     _values__rest="${2}"
@@ -151,7 +151,7 @@ _channels_dir_in() { #reviewed
     return 0
 }
 
-_bundle_in() {
+_bundle_in() { #reviewed
     #the directory the channels this file carries are written to, once a build:
     #    _bundle_in  =>  0, ~/.cmdfound/bundle/<BUNDLE_ID>
     #1 for cmdfound.in, which carries none
@@ -162,6 +162,11 @@ _bundle_in() {
     _bi__tmp="${_bundle_in__out}.$$"
     rm -rf "${_bi__tmp}"
     _bi__self="$(_util_realpath "${0}")" && _util_mkdir_p "${_bi__tmp}" || return 1
+    #a file in a .d carries its path, distro.d/rpm.d/fedora: its directories first
+    for _bi__dir in $(sed -n '/^__CMDFOUND_BUNDLE__$/,$ s/^__CMDFOUND_FILE__ [0-7]* \(.*\)\/[^/]*$/\1/p' "${_bi__self}" | sort -u); do
+        case "${_bi__dir}" in /*|*..*) rm -rf "${_bi__tmp}"; return 1 ;; esac
+        _util_mkdir_p "${_bi__tmp}/${_bi__dir}" || { rm -rf "${_bi__tmp}"; return 1; }
+    done
     #./build appends each channel past the end of the code, a mode and a name before it
     _bi__modes="$(awk -v dir="${_bi__tmp}" '
         $0 == "__CMDFOUND_BUNDLE__" { on = 1; next }
@@ -184,6 +189,25 @@ _bundle_in() {
 _channels_dir() { #@frozen 2026-09-27 m@javier.io 2e226ed
     _channels_dir_in #the same directory, printed, for a caller that wants it in a substitution
     printf "%s\\n" "${_channels_dir_in__out}"
+}
+
+_channel_file_in() { #reviewed
+    #$1 => channel. <family>.d/<format>.d/<name>
+    #    _channel_file_in aqua    =>  0, __out .../aqua, __run .../aqua
+    #    _channel_file_in fedora  =>  0, __out .../distro.d/rpm.d/fedora, __run .../distro
+    #    _channel_file_in nope    =>  1
+    case "${1}" in ''|.*|*/*) return 1 ;; esac
+    _channels_dir_in
+    _channel_file_in__out="${_channels_dir_in__out}/${1}"
+    _channel_file_in__run="${_channel_file_in__out}"
+    [ -f "${_channel_file_in__out}" ] && [ -x "${_channel_file_in__out}" ] && return 0
+    for _cfi__row in "${_channels_dir_in__out}"/*.d/*.d/"${1}"; do
+        [ -f "${_cfi__row}" ] || continue
+        _channel_file_in__out="${_cfi__row}"
+        _channel_file_in__run="${_cfi__row%/*/*}"; _channel_file_in__run="${_channel_file_in__run%.d}"
+        [ -f "${_channel_file_in__run}" ] && return 0
+    done
+    return 1
 }
 
 _channels_conf() { #@reviewed 2026-10-01 m@javier.io 2e226ed
@@ -219,7 +243,7 @@ _channels_conf() { #@reviewed 2026-10-01 m@javier.io 2e226ed
             esac
         done
         [ -n "${_cc__line}" ] || continue
-        if [ ! -f "${_cc__dir}/${_cc__line}" ] || [ ! -x "${_cc__dir}/${_cc__line}" ]; then
+        if ! _channel_file_in "${_cc__line}"; then
             [ X"${1}" = X"warn" ] && \
                 _msg "${PROGNAME}: no channel called '${_cc__line}', named in ${_cc__conf}"
             continue
@@ -265,11 +289,19 @@ _channels() { #@frozen 2026-09-28 m@javier.io 2e226ed
             printf "%s\\n" "${_channels__on%:*}"
         done
     else
-        for _channels__file in "${_channels__dir}"/*; do
-            [ -f "${_channels__file}" ] || continue
-            [ -x "${_channels__file}" ] || continue
-            printf "%s\\n" "${_channels__file##*/}"
-        done
+        #a row of a family is a channel as well, distro.d/rpm.d/fedora is fedora,
+        #and all of them come in one order
+        {
+            for _channels__file in "${_channels__dir}"/*; do
+                [ -f "${_channels__file}" ] || continue
+                [ -x "${_channels__file}" ] || continue
+                printf "%s\\n" "${_channels__file##*/}"
+            done
+            for _channels__file in "${_channels__dir}"/*.d/*.d/*; do
+                [ -f "${_channels__file}" ] || continue
+                printf "%s\\n" "${_channels__file##*/}"
+            done
+        } | LC_ALL=C sort
     fi | while read -r _channels__name; do
         #a channel waiting on a program to read its catalog with is not asked:
         #_obtain_needs sets CMDFOUND_WITHOUT before it resolves
@@ -324,7 +356,7 @@ _channel_meta() { #@frozen 2026-09-27 m@javier.io 2e226ed
 ###############################################################################
 
 _spec_in() { #reviewed
-    #$1 => a spec, eg: aqua:jq@1.7
+    #$1 => spec, eg: aqua:jq@1.7
     _spec_in__channel=""
     _spec_in__package="${1}"
     case "${1}" in
@@ -630,9 +662,9 @@ _probe2route() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _routes_per_runtime() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a catalog, $2 => its probe, $3 => the package, $4 => what the catalog
-    #says of itself. A catalog is never a route by itself: what it has runs
-    #inside an image, and each runtime here that can run it is one route to it
+    #$1 => catalog, $2 => probe, $3 => package, $4 => what the catalog says of itself.
+    #A catalog is never a route by itself: what it has runs inside an image,
+    #and each runtime here that can run it is one route to it
     #    a route printed for each runtime  =>  2
     #    nothing here can run the image    =>  3
     #    the catalog did not have it       =>  1
@@ -819,10 +851,71 @@ _obtain_needs() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 
 _catalog_bytes() { #@reviewed 2026-10-25 m@javier.io 2e226ed
     #$1 => a channel whose catalog is about to be fetched. Sets g_catalog_bytes
+    #asked once a run: a catalog is weighed with a HEAD for each of its files
+    case " ${g_catalog_sizes} " in
+        *" ${1}="*) g_catalog_bytes="${g_catalog_sizes#*" ${1}="}"
+                    g_catalog_bytes="${g_catalog_bytes%% *}"
+                    return 0 ;;
+    esac
     g_catalog_bytes="$(PATH="$(_channel_home "${1}")/needs:${PATH}" \
         _api_channel "${1}" index bytes 2>/dev/null | \
         awk -F= '$1 == "bytes" {print $2; exit}')"
     _util_is_number "${g_catalog_bytes}" || g_catalog_bytes=""
+    g_catalog_sizes="${g_catalog_sizes} ${1}=${g_catalog_bytes}"
+}
+
+_weigh_catalogs() {
+    #$1... => channels whose catalogs are about to be fetched. Asks all of them
+    #at once what their catalog weighs, and says so: a distro's is many files, a
+    #HEAD each, and one channel after another took half a minute with nothing
+    #said. _catalog_bytes then has the answers
+    _wc__ask=""
+    for _wc__channel in "${@}"; do
+        case " ${g_catalog_sizes} " in *" ${_wc__channel}="*) continue ;; esac
+        _wc__ask="${_wc__ask} ${_wc__channel}"
+    done
+    [ -n "${_wc__ask}" ] || return 0
+    _util_mkdir_p "${g_home}/tmp" || return 0
+    set -- ${_wc__ask}
+    #not which: the ones worth fetching are named next, with their weight,
+    #and one weighed here may turn out not to be
+    _msg "${PROGNAME}: asking catalogs"
+    _wc__run=""
+    for _wc__channel in "${@}"; do
+        PATH="$(_channel_home "${_wc__channel}")/needs:${PATH}" \
+            _api_channel "${_wc__channel}" index bytes > "${g_home}/tmp/bytes.$$.${_wc__channel}" 2>/dev/null &
+        _wc__run="${_wc__run} ${!}"
+    done
+    for _wc__pid in ${_wc__run}; do
+        wait "${_wc__pid}" 2>/dev/null
+    done
+    for _wc__channel in "${@}"; do
+        _wc__bytes="$(awk -F= '$1 == "bytes" {print $2; exit}' "${g_home}/tmp/bytes.$$.${_wc__channel}" 2>/dev/null)"
+        rm -f "${g_home}/tmp/bytes.$$.${_wc__channel}"
+        _util_is_number "${_wc__bytes}" || _wc__bytes=""
+        g_catalog_sizes="${g_catalog_sizes} ${_wc__channel}=${_wc__bytes}"
+    done
+}
+
+_fetching_head_in() {
+    #$1 => package, $2 => 1 when a catalog that confines has it already, $3 =>
+    #1 when a tier was fetched before, $4 => 1 when a local catalog could not
+    #be asked. How the sentence that names the catalogs about to be fetched
+    #begins and ends, for _fetching_says:
+    #    _fetching_head_in jq "" "" ""   =>  "no local catalog has 'jq'; fetching ", "", ""
+    #    _fetching_head_in jq 1 "" ""    =>  "'jq' is only in a dockerized local catalog; fetching the native ", " first", "of"
+    _fetching_head_in__tail=""; _fetching_head_in__of=""
+    if [ -n "${2}" ]; then
+        _fetching_head_in__head="'${1}' is only in a dockerized local catalog; fetching the native "
+        _fetching_head_in__tail=" first"; _fetching_head_in__of="of"
+    elif [ -n "${3}" ]; then
+        _fetching_head_in__head="no catalog yet has '${1}'; fetching "
+    elif [ -n "${4}" ]; then
+        _fetching_head_in__head="no local catalog that could be asked has '${1}'; fetching "
+    else
+        _fetching_head_in__head="no local catalog has '${1}'; fetching "
+    fi
+    return 0
 }
 
 _fetching_says() { #@reviewed 2026-09-28 m@javier.io 2e226ed
@@ -883,36 +976,75 @@ _first_catalogs() { #@reviewed 2026-10-09 m@javier.io 2e226ed
         fi
     done
 
-    #the ones that can go now go together
-    if [ -n "${_fc__ready}" ]; then
-        if [ -n "${_fc__confined}" ]; then
-            _fetching_says "'${_fc__pkg}' is only in a dockerized local catalog; fetching the native " \
-                " first" "of" ${_fc__ready}
+    #the ones that can go now go together, the light ones first: a catalog
+    #over CATALOG_LIGHT, a distro's of tens of MB, is fetched only when none
+    #of the light ones had the name
+    _fc__light=""; _fc__heavy=""
+    _weigh_catalogs ${_fc__ready}
+    for _fc__channel in ${_fc__ready}; do
+        _catalog_bytes "${_fc__channel}"
+        if [ -n "${g_catalog_bytes}" ] && [ "${g_catalog_bytes}" -gt "${CATALOG_LIGHT}" ]; then
+            _fc__heavy="${_fc__heavy} ${_fc__channel}"
         else
-            _fetching_says "no local catalog has '${_fc__pkg}'; fetching " "" "" ${_fc__ready}
+            _fc__light="${_fc__light} ${_fc__channel}"
         fi
-        for _fc__channel in ${_fc__waiting}; do
-            _msg "${PROGNAME}: ${_fc__channel} goes after them, its catalog is read with a program not here yet"
-        done
-        _race_catalogs "${_fc__pkg}" "${_fc__version}" ${_fc__ready}
-        case "${?}" in
-            0) return 0 ;;
-            2) _fc__confined="1" ;;
+    done
+    #three tiers, each only when the one before had nothing: the light ones,
+    #then the ones read with a program not here yet, one at a time once that
+    #program is got - nix-portable's catalog and sqlite3 cost less than a
+    #distro's - and the heavy ones last
+    _fc__said=""
+    for _fc__tier in light waiting heavy; do
+        case "${_fc__tier}" in
+            light)   _fc__ready="${_fc__light}" ;;
+            waiting) _fc__ready="${_fc__waiting}" ;;
+            heavy)   _fc__ready="${_fc__heavy}" ;;
         esac
-    fi
-
-    #and then, one at a time, the ones whose program has to be got first
-    for _fc__channel in ${_fc__waiting}; do
-        if [ -n "${_fc__confined}" ] && _confines "${_fc__channel}"; then
-            _msg "${PROGNAME}: ${_fc__channel} is not read after all: it confines, and one that confines has '${_fc__pkg}' already"
+        #a tier before this one may have found the name where it confines: of
+        #this one, only a catalog that does not is still worth fetching. The
+        #waiting ones are asked one by one below, as one of them may find it
+        if [ -n "${_fc__confined}" ] && [ X"${_fc__tier}" != X"waiting" ]; then
+            _fc__native=""
+            for _fc__channel in ${_fc__ready}; do
+                _confines "${_fc__channel}" || _fc__native="${_fc__native} ${_fc__channel}"
+            done
+            _fc__ready="${_fc__native}"
+        fi
+        [ -n "${_fc__ready}" ] || continue
+        if [ X"${_fc__tier}" = X"waiting" ]; then
+            for _fc__channel in ${_fc__ready}; do
+                if [ -n "${_fc__confined}" ] && _confines "${_fc__channel}"; then
+                    _msg "${PROGNAME}: ${_fc__channel} is not read after all: it confines, and one that confines has '${_fc__pkg}' already"
+                    continue
+                fi
+                if ! _obtain_needs "${_fc__channel}"; then
+                    printf "~unreachable %s %s\\n" "${_fc__channel}" "a program its catalog is read with could not be had"
+                    continue
+                fi
+                _fetching_head_in "${_fc__pkg}" "${_fc__confined}" "${_fc__said}" "${g_unasked}"
+                _fetching_says "${_fetching_head_in__head}" "${_fetching_head_in__tail}" "${_fetching_head_in__of}" "${_fc__channel}"
+                _fc__said="1"
+                _race_catalogs "${_fc__pkg}" "${_fc__version}" "${_fc__channel}"
+                case "${?}" in
+                    0) return 0 ;;
+                    2) _fc__confined="1" ;;
+                esac
+            done
             continue
         fi
-        if ! _obtain_needs "${_fc__channel}"; then
-            printf "~unreachable %s %s\\n" "${_fc__channel}" "a program its catalog is read with could not be had"
-            continue
+        _fetching_head_in "${_fc__pkg}" "${_fc__confined}" "${_fc__said}" "${g_unasked}"
+        _fetching_says "${_fetching_head_in__head}" "${_fetching_head_in__tail}" "${_fetching_head_in__of}" ${_fc__ready}
+        #the first time, what comes after these and why
+        if [ -z "${_fc__said}" ]; then
+            for _fc__channel in ${_fc__waiting}; do
+                _msg "${PROGNAME}: ${_fc__channel} comes after, its catalog needs a program not here yet"
+            done
+            if [ X"${_fc__tier}" = X"light" ] && [ -n "${_fc__heavy}" ]; then
+                _msg "${PROGNAME}: the full distro catalogs go last, only if these miss"
+            fi
         fi
-        _fetching_says "fetching " "" "" "${_fc__channel}"
-        _race_catalogs "${_fc__pkg}" "${_fc__version}" "${_fc__channel}"
+        _fc__said="1"
+        _race_catalogs "${_fc__pkg}" "${_fc__version}" ${_fc__ready}
         case "${?}" in
             0) return 0 ;;
             2) _fc__confined="1" ;;
@@ -968,7 +1100,7 @@ _index2oneline_in() { #@frozen 2026-10-01 m@javier.io 2e226ed
         case "${_i2o__line}" in
             #the bytes were said before the fetch, and a line with a second = is
             #a value whose shape only the channel knows
-            bytes=*|*=*=*) ;;
+            arrived=*|bytes=*|*=*=*) ;;
             *=*) _i2o__pair="${_i2o__line#*=} ${_i2o__line%%=*}"
                  _index2oneline_in__out="${_index2oneline_in__out:+${_index2oneline_in__out}, }${_i2o__pair}" ;;
         esac
@@ -992,7 +1124,7 @@ _pause_others() { #@reviewed 2026-10-25 m@javier.io 2e226ed
     #  this channel   │    paused    │    paused     │
     #  confines       │              │               │
     #                 └──────────────┴───────────────┘
-    _pause_others__paused=""; _pause_others__going=""; _pause_others__native=""
+    _pause_others__paused=""; _pause_others__going=""; _pause_others__native=""; _pause_others__finishing=""
     _po__had="${1}"; shift
     for _po__entry in "${@}"; do
         _catalog_fetch_in "${_po__entry}"
@@ -1005,6 +1137,14 @@ _pause_others() { #@reviewed 2026-10-25 m@javier.io 2e226ed
             continue
         fi
         if kill -0 "${_po__pid}" 2>/dev/null; then
+            #one past its download, _api_catalog_arrived said, is not stopped:
+            #it ignores the stop, to leave no half catalog behind, and a wait on
+            #it was a wait for the whole reading. It finishes on its own
+            if awk -F= '$1 == "arrived" {f = 1; exit} END {exit !f}' "${g_home}/tmp/index.$$.${_po__channel}" 2>/dev/null; then
+                _pause_others__finishing="${_pause_others__finishing:+${_pause_others__finishing} }${_po__channel}"
+                rm -f "${g_home}/tmp/index.$$.${_po__channel}"
+                continue
+            fi
             kill "${_po__pid}" 2>/dev/null
             wait "${_po__pid}" 2>/dev/null
             _pause_others__paused="${_pause_others__paused:+${_pause_others__paused}, }${_po__channel}"
@@ -1033,13 +1173,17 @@ _race_catalogs() { #@reviewed 2026-10-25 m@javier.io 2e226ed
     _rc__run=""
     for _rc__channel in "${@}"; do
         #the channel itself runs in the background, not a shell around it, so
-        #that stopping it stops the download
-        PATH="$(_channel_home "${_rc__channel}")/needs:${PATH}" \
-            _api_channel "${_rc__channel}" index > "${g_home}/tmp/index.$$.${_rc__channel}" 2>/dev/null &
+        #that stopping it stops the download. In braces: a function sent to the
+        #background with its own redirection keeps, under dash, a copy of the
+        #stdout it had, the pipe of the $(...) this runs in, which then waits
+        #for the channel however long it reads; a group does not
+        { PATH="$(_channel_home "${_rc__channel}")/needs:${PATH}" \
+            _api_channel "${_rc__channel}" index; } > "${g_home}/tmp/index.$$.${_rc__channel}" 2>/dev/null </dev/null &
         _rc__run="${_rc__run} ${_rc__channel}:${!}:$(_util_now_ms)"
     done
 
     #and they are read in whatever order they arrive
+    _rc__t0="$(_util_now_ms)"; _rc__told="0"; _rc__tick="0"
     while [ -n "${_rc__run}" ]; do
         _rc__left=""
         for _rc__entry in ${_rc__run}; do
@@ -1087,28 +1231,43 @@ _race_catalogs() { #@reviewed 2026-10-25 m@javier.io 2e226ed
             _after_in "${_rc__run}" "${_rc__entry}"
             _pause_others "${_rc__had}" ${_rc__left} ${_after_in__out}
             _rc__paused="${_pause_others__paused}"
+            _and_in ${_pause_others__finishing}; _rc__finishing="${_and_in__out}"
             _rc__native="${_pause_others__native}"
+            _rc__others="${_rc__paused:+; ${_rc__paused} paused, to go on when needed}${_rc__finishing:+; ${_rc__finishing} arrived, the reading goes on in the background}"
             if [ "${_rc__had}" -eq "0" ]; then
-                [ -n "${_rc__paused}" ] && \
-                    _msg "${PROGNAME}: ${_rc__channel} has '${_rc__pkg}'; ${_rc__paused} paused, to go on when needed"
+                [ -n "${_rc__others}" ] && \
+                    _msg "${PROGNAME}: ${_rc__channel} has '${_rc__pkg}'${_rc__others}"
                 return 0
             fi
             _and_in ${_rc__native}
-            _msg "${PROGNAME}: ${_rc__channel} has '${_rc__pkg}', dockerized${_rc__paused:+; ${_rc__paused} paused, to go on when needed}${_rc__native:+; reading the native ${_and_in__out} first}"
+            _msg "${PROGNAME}: ${_rc__channel} has '${_rc__pkg}', dockerized${_rc__others}${_rc__native:+; reading the native ${_and_in__out} first}"
             #what is left is native; the ones not read this time are read the next
             _rc__confined="1"
             _rc__left="${_pause_others__going}"
             break
         done
         _rc__run="${_rc__left}"
-        [ -n "${_rc__run}" ] && { sleep 0.1 2>/dev/null || sleep 1; }
+        [ -n "${_rc__run}" ] || continue
+        sleep 0.1 2>/dev/null || sleep 1
+        #a fetch still going is said to be every CATALOG_HEARTBEAT seconds. The
+        #clock is a process, so it is read every few ticks and not every one
+        _rc__tick=$((_rc__tick + 1))
+        [ $((_rc__tick % 5)) -eq "0" ] || continue
+        _rc__gone=$(( ($(_util_now_ms) - _rc__t0) / 1000 ))
+        [ "${_rc__gone}" -ge $((_rc__told + CATALOG_HEARTBEAT)) ] || continue
+        _rc__told="${_rc__gone}"
+        _rc__names=""
+        for _rc__entry in ${_rc__run}; do
+            _rc__names="${_rc__names} ${_rc__entry%%:*}"
+        done
+        _fetching_says "still waiting for " ", ${_rc__gone} s so far" "" ${_rc__names}
     done
     [ -n "${_rc__confined}" ] && return 2
     return 1
 }
 
 _runtime_spec_in() { #@reviewed 2026-10-01 m@javier.io 2e226ed
-    #$1 => a spec's channel, $2 => its package. Answers runtime, channel, package:
+    #$1 => spec's channel, $2 => package. Answers runtime, channel, package:
     #    _runtime_spec_in udocker alpine/jq  =>  udocker  alpine   jq
     #    _runtime_spec_in aqua jqlang/jq     =>           aqua     jqlang/jq
     #    _runtime_spec_in udocker udocker    =>           udocker  udocker
@@ -1157,7 +1316,7 @@ _probe_all() { #@reviewed 2026-10-25 m@javier.io 2e226ed
         fi
 
         #each channel in turn, and what it answered handed to _probe2route
-        _pa__catalog=""; _pa__native=""; _pa__confined=""; _pa__missing=""
+        _pa__catalog=""; _pa__native=""; _pa__confined=""; _pa__missing=""; _pa__unasked=""
         for _pa__channel in $(_channels); do
             [ -n "${_pa__only}" ] && \
                 [ X"${_pa__only}" != X"${_pa__channel}" ] && continue
@@ -1178,6 +1337,12 @@ _probe_all() { #@reviewed 2026-10-25 m@javier.io 2e226ed
                 _pa__missing="${_pa__missing} ${_pa__channel}"
                 continue
             fi
+            #a catalog here that could not tell, aqua with github's api limit
+            #used up, is said if the others are fetched for it
+            if [ "${_pa__rc}" -eq "2" ]; then
+                _api_value_in unreachable "${_pa__said}"
+                _pa__unasked="${_pa__unasked}${_pa__channel} ${_api_value_in__out:-it gave no reason}${NL}"
+            fi
 
             _probe2route "${_pa__channel}" "${_pa__said}" "${_pa__rc}" \
                 "${_pa__package}"
@@ -1195,6 +1360,14 @@ _probe_all() { #@reviewed 2026-10-25 m@javier.io 2e226ed
         #the catalogs with no index race for one, each an argument of its own,
         #and only where nothing native turned up: an index costs to fetch
         if [ -z "${_pa__native}" ] && [ -n "${_pa__missing}" ]; then
+            g_unasked=""
+            while IFS= read -r _pa__line; do
+                [ -n "${_pa__line}" ] || continue
+                _msg "${PROGNAME}: ${_pa__line%% *} could not be asked for '${_pa__package}': ${_pa__line#* }"
+                g_unasked="1"
+            done <<UNASKED
+${_pa__unasked}
+UNASKED
             _first_catalogs "${_pa__package}" "${_pa__version}" \
                 "${_pa__confined}" ${_pa__missing}
         fi
@@ -1249,13 +1422,13 @@ _confirm() { #@reviewed 2026-09-28 m@javier.io 2e226ed
 }
 
 _ask_which() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => the name, $2 => one channel:package per line. Prints the choice
+    #$1 => name, $2 => one channel:package per line. Prints the choice
     _tty || return 1
     [ -n "${g_assume_yes}" ] && return 1
 
-    printf "%s\\n" "${PROGNAME}: '${1}' is the name of more than one program:" > /dev/tty
+    printf "%s\\n" "${PROGNAME}: '${1}' is a program in more than one package:" > /dev/tty
     printf "%s\\n" "${2}" | awk 'NF {printf("  %d) %s\n", NR, $0)}' > /dev/tty
-    printf "%s" "which one? [number, anything else cancels] " > /dev/tty
+    printf "%s" "which package? [number, anything else cancels] " > /dev/tty
     read -r _ask_which__answer < /dev/tty || return 1
     _util_is_number "${_ask_which__answer}" || return 1
     _ask_which__pick="$(printf "%s\\n" "${2}" | awk -v n="${_ask_which__answer}" 'NF && NR == n {print; exit}')"
@@ -1264,8 +1437,8 @@ _ask_which() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _find_program() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a store directory, $2 => the name asked for.
-    #    _find_program store jq  =>  store/jq-1.7/bin/jq
+    #$1 => store directory,   $2 => name
+    #    _find_program store jq  => store/jq-1.7/bin/jq
     [ -x "${1}/${2}" ] && { printf "%s\\n" "${1}/${2}"; return 0; }
 
     #the first one find walks to. Cut in the shell, since head is a process
@@ -1305,7 +1478,7 @@ _fetcher_timed() { #@frozen 2026-10-25 m@javier.io 2e226ed
 }
 
 _where_in() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a locate answer, $2 => the package
+    #$1 => locate answer, $2 => package
     #    url=https://h/jq.gz format=gz bin=jq sha256=9f2c  =>  https://h/jq.gz, gz, jq, 9f2c, verified
     _api_value_in url    "${1}"; _where_in__url="${_api_value_in__out}"
     _api_value_in format "${1}"; _where_in__format="${_api_value_in__out}"
@@ -1465,19 +1638,15 @@ _place_tool() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 ###############################################################################
 
 _key_in() { #@frozen 2026-10-25 m@javier.io 2e226ed
-    #$1 => a spec
+    #$1 => spec
     _util_replace_in "${1}" "/:@" "_"; _key_in__out="${_util_replace_in__out}"
     return 0
 }
 
 _cache_key() { #@frozen 2026-09-22 m@javier.io 2e226ed
-    #the same name, printed, for a caller that wants it in a substitution
     _key_in "${1}"
     printf "%s\\n" "${_key_in__out}"
 }
-
-#a decision is the program a spec runs, on its first line, and on its second
-#the placement that program was placed as: channel, package and version
 
 _cache_get() { #@frozen 2026-10-05 m@javier.io 2e226ed
     #$1 => spec
@@ -1517,7 +1686,7 @@ _lock_path() { #@frozen 2026-10-05 m@javier.io 2e226ed
 }
 
 _lock_pid() { #@frozen 2026-10-25 m@javier.io 2e226ed
-    #$1 => a lock. Sets g_lock_pid to the pid it names
+    #$1 => lock. Sets g_lock_pid to the pid it names
     g_lock_pid=""
     [ -f "${1}/pid" ] || return 1
     IFS= read -r g_lock_pid 2>/dev/null < "${1}/pid"
@@ -1527,7 +1696,7 @@ _lock_pid() { #@frozen 2026-10-25 m@javier.io 2e226ed
 }
 
 _is_lock_held() { #@frozen 2026-10-01 m@javier.io 2e226ed
-    #$1 => a lock. Sets g_lock_pid to the run it found:
+    #$1 => lock. Sets g_lock_pid to the run it found:
     #    a pid still there  =>  0
     #    a pid gone         =>  1, g_lock_pid still naming that run
     #    no pid at all      =>  1, g_lock_pid empty
@@ -1535,7 +1704,7 @@ _is_lock_held() { #@frozen 2026-10-01 m@javier.io 2e226ed
 }
 
 _lock_steal() { #@frozen 2026-10-05 m@javier.io 2e226ed
-    #$1 => a lock whose pid names a run that is gone. Takes it over, and answers
+    #$1 => lock whose pid names a run that is gone. Takes it over, and answers
     #1 where another run got there first. $$ is this run's own pid inside the
     #subshell, which POSIX says a subshell does not change
     #
@@ -1774,7 +1943,7 @@ _remembered_programs_in() { #@reviewed 2026-10-05 m@javier.io 2e226ed
 }
 
 _programs_under_in() { #@reviewed 2026-10-05 m@javier.io 2e226ed
-    #$1 => a directory, $2 => programs, one a line. Those under it, a space apart:
+    #$1 => directory, $2 => programs, one a line. Those under it, a space apart:
     #    _programs_under_in ~/.cmdfound/channels/github/store/6f2ab1... "${programs}"
     #        =>  ~/.cmdfound/channels/github/store/6f2ab1.../jq
     _programs_under_in__out=""
@@ -1921,7 +2090,7 @@ _list() { #@reviewed 2026-10-05 m@javier.io 2e226ed
 }
 
 _purge() { #@reviewed 2026-10-05 m@javier.io 2e226ed
-    #$1 => a spec (optional)
+    #$1 => spec (optional)
     #    _purge              =>  the whole home
     #    _purge aqua:        =>  the aqua channel, all of it
     #    _purge aqua:jq@1.7  =>  the one placement
@@ -1933,7 +2102,7 @@ _purge() { #@reviewed 2026-10-05 m@javier.io 2e226ed
 }
 
 _purge_refused() { #reviewed
-    #$1 => a channel, or nothing for the whole home. 0 when something there is
+    #$1 => channel, or nothing for the whole home. 0 when something there is
     #being installed, having said what, by which pid, and that nothing was removed
     _pr__live="$(_lock_live "${1}")" || return 1
     printf "%s\\n" "${_pr__live}" | while IFS="${TAB}" read -r _pr__pid _pr__installing; do
@@ -1945,8 +2114,7 @@ _purge_refused() { #reviewed
 }
 
 _purge_removed() { #reviewed
-    #$1 => a directory to remove whole, read-only ones in it included. 1 when
-    #some of it stays, having said so
+    #$1 => directory, read-only ones in it included. 1 when some of it stays
     _util_removable "${1}"
     rm -rf "${1}" && return 0
     _msg "${PROGNAME}: ${1} could not be removed entirely"
@@ -1964,7 +2132,7 @@ _purge_home() { #reviewed
     _channels_dir_in
     for _ph__home in "${g_home}"/channels/*; do
         _ph__channel="${_ph__home##*/}"
-        [ -d "${_ph__home}" ] && [ -x "${_channels_dir_in__out}/${_ph__channel}" ] || continue
+        [ -d "${_ph__home}" ] && _channel_file_in "${_ph__channel}" || continue
         _channel_meta_in "${_ph__channel}" reclaims
         [ X"${_channel_meta_in__out}" = X"yes" ] && _reclaim "${_ph__channel}" all
     done
@@ -1974,7 +2142,7 @@ _purge_home() { #reviewed
 }
 
 _purge_channel() { #reviewed
-    #$1 => a channel, and everything it has here: its tool, its placements and
+    #$1 => channel, and everything it has here: its tool, its placements and
     #what it holds besides, which --list shows as the channel's own row
     #
     #No decision is swept. One that ran from this channel names a program that
@@ -2051,9 +2219,7 @@ _store_entry_in() { #@reviewed 2026-10-05 m@javier.io 2e226ed
 }
 
 _wait_for_installs() { #@reviewed 2026-10-05 m@javier.io 2e226ed
-    #$1 => a channel, $2 => a package, $3 => a version, $4 => a placement (all
-    #optional), as _lock_live reads them
-
+    #$1 => channel, $2 => package, $3 => version, $4 => a placement (all optional), as _lock_live reads them
     #removing a placement while it is being made leaves half of it behind
     while _wfi__live="$(_lock_live "${1}" "${2}" "${3}" "${4}")"; do
         _wfi__first="${_wfi__live%%${NL}*}"
@@ -2282,7 +2448,7 @@ EOF
 }
 
 _purge_spec() { #@reviewed 2026-10-05 m@javier.io 2e226ed
-    #$1 => a spec, eg: aqua:jq@1.7. Answers 1 when it doesnt matches anything
+    #$1 => spec, eg: aqua:jq@1.7. Answers 1 when it doesnt matches anything
     _spec_in "${1}"
     _ps__spec_channel="${_spec_in__channel}"
     _ps__spec_package="${_spec_in__package}"
@@ -2482,13 +2648,13 @@ _manager_update() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _index_update() { #@reviewed 2026-10-05 m@javier.io 2e226ed
-    #$1 => a channel (optional), all of them. Answers 1 when any fails
+    #$1 => channel (optional), all of them. Answers 1 when any fails
 
     #a name that is no channel file can still be an alias of one
     _iu__only=""
     if [ -n "${1}" ]; then
         _iu__only="${1}"
-        if [ ! -x "$(_channels_dir)/${_iu__only}" ]; then
+        if ! _channel_file_in "${_iu__only}"; then
             _iu__only="$(_channel_by_alias "${1}")" || {
                 _msg "${PROGNAME}: no channel called '${1}'"
                 return 1
@@ -2647,7 +2813,7 @@ _route_catalog() { #@reviewed 2026-10-05 m@javier.io 2e226ed
 }
 
 _where_sum() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a locate answer, $2 => what its lines are prefixed with (optional):
+    #$1 => locate answer, $2 => what its lines are prefixed with (optional):
     #    sha256=9f86d… in it  =>  g_where_sum=9f86d…, g_where_badge=verified
     #    no sum in it         =>  g_where_sum=, g_where_badge=none
 
@@ -2659,7 +2825,7 @@ _where_sum() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _route_badge() { #@reviewed 2026-10-05 m@javier.io 2e226ed
-    #$1 => a route, $2 => the catalog whose program it runs (optional):
+    #$1 => route, $2 => catalog (optional):
     #    any route, $2=conda-forge        =>  0, g_route_badge=via conda-forge
     #    a route aqua's tool installs     =>  0, g_route_badge=via aqua
     #    a route cmdfound fetches itself  =>  1, g_route_badge=
@@ -2700,7 +2866,7 @@ _canonical_spec() { #@reviewed 2026-10-05 m@javier.io 2e226ed
     _cs__version="${_spec_in__version}"
 
     _channels_dir_in
-    if [ -z "${_cs__channel}" ] || [ -x "${_channels_dir_in__out}/${_cs__channel}" ]; then
+    if [ -z "${_cs__channel}" ] || _channel_file_in "${_cs__channel}"; then
         printf "%s\\n" "${1}"
         return 0
     fi
@@ -2726,7 +2892,7 @@ _remembered_program() { #@reviewed 2026-10-05 m@javier.io 2e226ed
 }
 
 _route_choice() { #@reviewed 2026-10-05 m@javier.io 2e226ed
-    #$1 => a route. Prints the channel:package it offers when the name has to be
+    #$1 => route. Prints the channel:package it offers when the name has to be
     #chosen between. A runtime's route offers the catalog's program, one program
     #however many runtimes can run it:
     #    000000 udocker 1.0 - via:alpine ... alpine/jq  =>  alpine:jq
@@ -2741,22 +2907,124 @@ _route_choice() { #@reviewed 2026-10-05 m@javier.io 2e226ed
 }
 
 _pick_program() { #@reviewed 2026-10-05 m@javier.io 2e226ed
-    #$1 => package, $2 => what the channels answered.
-    #Prints the channel:package when the name is more than one program
+    #$1 => package, $2 => what the channels answered, its routes ranked.
+    #Prints the channel:package when the name is more than one program. A
+    #package in many channels is one program: its best place stands for it,
+    #and only programs that differ are asked between
     _pp__ambiguous="$(printf "%s\\n" "${2}" | \
         awk '$1 == "~ambiguous" {for (i = 3; i <= NF; i++) print $2 ":" $i}')"
     [ -z "${_pp__ambiguous}" ] && return 0
-    _pp__choices="$( { printf "%s\\n" "${_pp__ambiguous}"
-                       printf "%s\\n" "${2}" | awk 'NF && $1 !~ /^~/' | \
-                           while read -r _pp__route; do _route_choice "${_pp__route}"; done
-                     } | awk 'NF && !seen[$0]++')"
-    _ask_which "${1}" "${_pp__choices}" && return 0
+    #each choice ranked as the resolver ranks: native routes, then native
+    #choices not probed yet, then the dockerized ones of each
+    _pp__ranked="$( {
+        printf "%s\\n" "${2}" | awk 'NF && $1 !~ /^~/' | while read -r _pp__route; do
+            _route_kind "${_pp__route}"
+            _pp__rank="1"; [ X"${_route_kind__out}" = X"native" ] || _pp__rank="3"
+            printf "%s %s\\n" "${_pp__rank}" "$(_route_choice "${_pp__route}")"
+        done
+        printf "%s\\n" "${_pp__ambiguous}" | while read -r _pp__choice; do
+            _pp__rank="2"; _confines "${_pp__choice%%:*}" && _pp__rank="4"
+            printf "%s %s\\n" "${_pp__rank}" "${_pp__choice}"
+        done
+    } | awk 'NF' | LC_ALL=C sort -s -k1,1)"
+    _programs_in "${1}" "${_pp__ranked}"
+    _util_is_one_line "${_programs_in__out}" && { printf "%s\\n" "${_programs_in__out%% *}"; return 0; }
+
+    #the package named as asked is the one meant, terminal or not: sl is the
+    #train, whatever else installs a program called sl
+    if [ -n "${_programs_in__named}" ]; then
+        printf "%s\\n" "${_programs_in__named%% *}"
+        return 0
+    fi
+
+    #with none named so, each package is shown with what its catalog says it is
+    _described_in "${_programs_in__out}"
+    if _pp__pick="$(_ask_which "${1}" "${_described_in__out}")"; then
+        printf "%s\\n" "${_pp__pick%% *}"
+        return 0
+    fi
 
     #nobody to ask: running the wrong program is worse than running none
-    _msg "${PROGNAME}: '${1}' is the name of more than one program, and none was guessed:"
-    printf "%s\\n" "${_pp__choices}" | while read -r _pp__choice; do _msg "    ${_pp__choice}"; done
+    _msg "${PROGNAME}: '${1}' is a program in more than one package, and none was guessed:"
+    printf "%s\\n" "${_described_in__out}" | while read -r _pp__choice; do _msg "    ${_pp__choice}"; done
     _msg "${PROGNAME}: run one of them by its full name"
     return 1
+}
+
+_described_in() {
+    #$1 => "channel:package  (also ...)" a line. Sets __out to the same lines,
+    #each with what the package's catalog says it is, when it says more than
+    #which programs the package provides
+    #    alt:codetest_sl  =>  alt:codetest_sl  - Steam locomotive
+    #    nix-portable:nixpkgs.sapling  =>  the same, its catalog has no words
+    _described_in__out=""
+    while IFS= read -r _di__line; do
+        [ -n "${_di__line}" ] || continue
+        _di__choice="${_di__line%% *}"
+        _di__word="${_di__choice#*:}"; _di__word="${_di__word##*/}"; _di__word="${_di__word##*.}"
+        _di__desc="$(_api_channel "${_di__choice%%:*}" search "${_di__word}" 2>/dev/null | \
+            awk -F'\t' -v c="${_di__choice}" '$1 == c && $3 != "" && $3 !~ /^provides / {print $3; exit}')"
+        [ -n "${_di__desc}" ] && _di__line="${_di__line}  - ${_di__desc}"
+        _described_in__out="${_described_in__out}${_di__line}${NL}"
+    done <<CHOICES
+${1}
+CHOICES
+    _described_in__out="${_described_in__out%${NL}}"
+}
+
+_programs_in() {
+    #$1 => the name asked, $2 => "rank channel:package" a line, best first.
+    #Sets __out to one line per program, its best place and where else it is,
+    #the one named as asked first, and __named to that line
+    #    1 alpine:dmidecode 2 nix-portable:nixpkgs.dmidecode 2 nix-portable:nixpkgs.u-root-cmds
+    #        =>  alpine:dmidecode  (also nix-portable)
+    #            nix-portable:nixpkgs.u-root-cmds
+    #A package is one program under each channel's spelling of it, a nix set
+    #or a language's prefix dropped, and across channels its last part names it:
+    #    pkgx:github.com/pypa/twine  nix-portable:nixpkgs.python313Packages.twine  =>  twine
+    #Two packages one channel tells apart are two programs, and a last part
+    #they share then joins nothing across channels:
+    #    twins:left/twin  twins:right/twin  =>  two programs
+    _programs_in__out="$(printf "%s\\n" "${2}" | awk -v asked="${1}" '
+        function own(p,   n, part) {
+            if (p ~ /^nixpkgs\./) { n = split(p, part, "."); p = part[n] }
+            sub(/^(python3[0-9]*|py3[0-9.]*|ruby[0-9.]*-rubygem|rubygem|perl|ruby)-/, "", p)
+            sub(/-(git|bin)$/, "", p)
+            return tolower(p)
+        }
+        function last(p) {
+            sub(/^.*\//, "", p)
+            if (p ~ /^[a-z0-9-]+\.(org|com|net|io|dev|sh)$/) sub(/\..*$/, "", p)
+            return p
+        }
+        NF == 2 {
+            ch = substr($2, 1, index($2, ":") - 1)
+            id = ch ":" own(substr($2, index($2, ":") + 1))
+            if (id in where) next
+            where[id] = $2; ids[++n] = id; key[id] = last(substr(id, index(id, ":") + 1))
+            if (!((key[id], ch) in seen)) seen[key[id], ch] = id
+            else if (seen[key[id], ch] != id) apart[key[id]] = 1
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                id = ids[i]; k = key[id]; f = (k in apart) ? id : k
+                ch = substr(id, 1, index(id, ":") - 1)
+                if (!(f in best)) { best[f] = where[id]; order[++m] = f; also[f] = ""; first[f] = ch }
+                else if (ch != first[f] && index(", " also[f] ", ", ", " ch ", ") == 0)
+                    also[f] = also[f] (also[f] == "" ? "" : ", ") ch
+            }
+            for (i = 1; i <= m; i++) {
+                f = order[i]
+                line = best[f] (also[f] == "" ? "" : "  (also " also[f] ")")
+                if (f == tolower(asked)) print "=" line; else rest = rest line "\n"
+            }
+            printf("%s", rest)
+        }')"
+    _programs_in__named=""
+    case "${_programs_in__out}" in
+        =*) _programs_in__out="${_programs_in__out#=}"
+            _programs_in__named="${_programs_in__out%%${NL}*}" ;;
+    esac
 }
 
 _routes_in() { #@reviewed 2026-10-05 m@javier.io 2e226ed
@@ -2862,7 +3130,7 @@ _why_no_route() { #@reviewed 2026-10-05 m@javier.io 2e226ed
 }
 
 _resolve() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a spec, eg: aqua:jq@1.7. Answers 1 when there is no route
+    #$1 => spec, eg: aqua:jq@1.7. Answers 1 when there is no route
 
     #what was asked for
     _spec_in "${1}"
@@ -3010,7 +3278,7 @@ _why_taken() { #@reviewed 2026-10-09 m@javier.io 2e226ed
 }
 
 _show_routes() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => the resolution, $2 => the program asked for
+    #$1 => resolution, $2 => the program asked for
 
     #the route taken, which the table marks, and the program, a package's last name
     _sr__routes="$(_values route "${1}")"
@@ -3105,7 +3373,7 @@ _show_routes() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _locate() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => the resolution, $2 => the program asked for.
+    #$1 => resolution, $2 => program
     #Prints where the artifact of the route taken lives
     _lc__route="$(_value route "${1}")"
     _route_field_in "${_lc__route}" channel; _lc__channel="${_route_field_in__out}"
@@ -3146,7 +3414,7 @@ _locate() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _catalog_in() { #@reviewed 2026-10-05 m@javier.io 2e226ed
-    #$1 => a route
+    #$1 => route
     #    ... via:conda-forge ... conda-forge/jq ...  =>  conda-forge
     #    a route to a channel's own program          =>  1
 
@@ -3516,10 +3784,52 @@ _obtained() { #@reviewed 2026-10-09 m@javier.io 2e226ed
     #the lock is held through locating, asking and installing, and freed after
     _od__where="$(_locate "${_od__resolution}" "${3}")" || { _lock_free; return 1; }
     _ask_proceed "${_od__resolution}" "${_od__where}" "${1}" || { _lock_free; return 1; }
-    _od__program="$(_obtain "${_od__resolution}" "${_od__where}" "${3}" "${4}")" || { _lock_free; return 1; }
+    if ! _od__program="$(_obtain "${_od__resolution}" "${_od__where}" "${3}" "${4}")"; then
+        _lock_free
+        #a runtime that could not install a catalog's package is not the
+        #package: proot under udocker fails what docker installs. Another
+        #runtime gets it once, named in full, so it is that one and no other
+        _other_runtime_in "${_od__resolution}" || return 1
+        _msg "${PROGNAME}: ${_od__channel} could not install it; ${_other_runtime_in__out} is tried instead"
+        _obtained "${_other_runtime_in__out}" "${2}" "${3}" "${4}"
+        return
+    fi
     _remember "${_od__program}" "${2}" "${1}" "${_od__placement}"
     _lock_free
     printf "%s\\n" "${_od__program}"
+}
+
+_other_runtime_in() {
+    #$1 => a resolution whose first route is a runtime's. Sets __out to the
+    #spec of the first other route that runs the same package of the same
+    #catalog through another runtime; 1 when there is none
+    #    route=... udocker ... via:rosa ... rosa/plasma5-baloo
+    #    route=... docker  ... via:rosa ... rosa/plasma5-baloo  =>  docker:rosa/plasma5-baloo@5.116.0-5
+    _other_runtime_in__out=""
+    _ori__first=""
+    _ori__routes="$(printf "%s\\n" "${1}" | awk 'index($0, "route=") == 1 {print substr($0, 7)}')"
+    while IFS= read -r _ori__route; do
+        [ -n "${_ori__route}" ] || continue
+        _route_kind "${_ori__route}"
+        if [ X"${_route_kind__out}" != X"dockerized" ] || ! _route_catalog "${_ori__route}" >/dev/null; then
+            [ -z "${_ori__first}" ] && return 1
+            continue
+        fi
+        _route_field_in "${_ori__route}" channel; _ori__channel="${_route_field_in__out}"
+        if [ -z "${_ori__first}" ]; then
+            _ori__first="${_ori__channel}"; _ori__choice="$(_route_choice "${_ori__route}")"
+            continue
+        fi
+        [ X"${_ori__channel}" != X"${_ori__first}" ] || continue
+        [ X"$(_route_choice "${_ori__route}")" = X"${_ori__choice}" ] || continue
+        _route_field_in "${_ori__route}" package; _ori__package="${_route_field_in__out}"
+        _route_field_in "${_ori__route}" version
+        _other_runtime_in__out="${_ori__channel}:${_ori__package}@${_route_field_in__out}"
+        return 0
+    done <<ROUTES
+${_ori__routes}
+ROUTES
+    return 1
 }
 
 _hook() { #reviewed
@@ -3564,8 +3874,54 @@ EOF
 #Written once for whoever needs it, this and its channels. A channel is loaded
 #inside a subshell of cmdfound's, so it inherits all of it and carries no copy
 
+#what a channel says when a path or a name it was about to write into a
+#launcher cannot be one. It is one sentence and not three because it promises
+#what _api_is_unsafe refuses, and a channel that checks only paths says its own
+LAUNCHER_UNSAFE="a path or a name here cannot be written into a launcher safely"
+
+#what a channel says when a catalog download stopped. It is one sentence and
+#not six because it promises what _api_fetcher_resumable does - the part stays,
+#with its etag, and the next run goes on from it - so a change there would
+#otherwise leave six channels saying something that is no longer true
+CATALOG_STOPPED="could not be downloaded; what arrived is kept, and the next try goes on from there"
+
+#how few rows is too few for a catalog to be one this reader still understands.
+#A number every channel checks against, so that moving it is one edit
+CATALOG_FLOOR="100"
+
+#how large a catalog may be and still be fetched with the first ones: the
+#distros' run to tens of MB, and go only when none of the light ones answered
+CATALOG_LIGHT="8000000"
+
+#how often a fetch still going is said to be, in seconds, so that a long one is
+#never a silence. CMDFOUND_HEARTBEAT moves it
+CATALOG_HEARTBEAT="${CMDFOUND_HEARTBEAT:-10}"
+case "${CATALOG_HEARTBEAT}" in ''|*[!0-9]*) CATALOG_HEARTBEAT="10" ;; esac
+
+#what a channel says when a question needs the catalog it has not fetched yet
+NO_INDEX="there is no local catalog yet, run: cmdfound --index-update"
+
+#how a channel's _search matches: each word asked for, in any case and order,
+#is somewhere in the text the channel's own awk hands words_in. Put in front of
+#that awk, which says what the text is and prints the lines. The words come
+#as search_words through the environment, since awk -v reads a backslash in
+#them as an escape
+SEARCH_AWK='
+    BEGIN { _sw_n = split(tolower(ENVIRON["search_words"]), _sw_w, " ") }
+    function words_in(hay,    i) {
+        hay = tolower(hay)
+        for (i = 1; i <= _sw_n; i++) if (index(hay, _sw_w[i]) == 0) return 0
+        return 1
+    }
+'
+
+#what a registry is asked to answer with: an image index or one platform's
+#manifest, in OCI's media types or docker's
+REGISTRY_ACCEPT="application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"
+DOCKER_HUB="https://registry-1.docker.io"
+
 _api_value_in() { #@frozen 2026-10-25 m@javier.io 2e226ed
-    #$1 => a key, $2 => key=value lines. The first value that key is given, whole
+    #$1 => key, $2 => key=value lines. The first value that key is given, whole
     #    _api_value_in version "${_p2r__out}"  =>  0, 1.7
     #    _api_value_in badge "${_p2r__out}"    =>  1
     _api_value_in__out=""
@@ -3583,20 +3939,25 @@ _api_value_in() { #@frozen 2026-10-25 m@javier.io 2e226ed
 }
 
 _api_channel() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a channel. Loads the channel instead of starting it as a program, so
+    #$1 => channel. Loads the channel instead of starting it as a program, so
     #that it inherits the channel api and carries no copy of it.
     case "${1}" in
-        #a path, for a channel being written that is not in the directory yet
-        */*) _api_channel__file="${1}" ;;
-          *) _channels_dir_in; _api_channel__file="${_channels_dir_in__out}/${1}" ;;
+        #a path, for a channel being written that is not in the directory yet;
+        #a row named by its path is still run by its family
+        */*) _api_channel__file="${1}"; _api_channel__run="${1}"
+             case "${1%/*}" in
+                 *.d/*.d) [ -x "${1}" ] || { _api_channel__run="${1%/*/*}"; _api_channel__run="${_api_channel__run%.d}"; } ;;
+             esac ;;
+          *) _channel_file_in "${1}"
+             _api_channel__file="${_channel_file_in__out}"; _api_channel__run="${_channel_file_in__run}" ;;
     esac
     shift
     CMDFOUND_CHANNEL_FILE="${_api_channel__file}"; export CMDFOUND_CHANNEL_FILE
-    . "${_api_channel__file}"
+    . "${_api_channel__run}"
 }
 
 _api_format_of() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a file's name.
+    #$1 => filename
     #    _api_format_of jq-1.8-linux.TAR.GZ  =>  tar.gz
     #    _api_format_of jq-linux-amd64       =>  raw
     case "$(_util_lower "${1}")" in
@@ -3643,7 +4004,7 @@ _api_is_catalog_package() { #@frozen 2026-10-25 m@javier.io 2e226ed
 }
 
 _api_is_image_ref() { #@frozen 2026-10-25 m@javier.io 2e226ed
-    #$1 => an image as a catalog names it, repository[:tag][@sha256:<hex>]
+    #$1 => image, repository[:tag][@sha256:<hex>]
     #    _api_is_image_ref docker.io/library/alpine:3.22  =>  0
     #    _api_is_image_ref -rf                            =>  1
     #A runtime may still turn down what passes here: udocker splits at the first colon
@@ -3652,11 +4013,6 @@ _api_is_image_ref() { #@frozen 2026-10-25 m@javier.io 2e226ed
     esac
     return 0
 }
-
-#what a channel says when a path or a name it was about to write into a
-#launcher cannot be one. It is one sentence and not three because it promises
-#what _api_is_unsafe refuses, and a channel that checks only paths says its own
-LAUNCHER_UNSAFE="a path or a name here cannot be written into a launcher safely"
 
 _api_is_unsafe() { #@reviewed 2026-10-25 m@javier.io 2e226ed
     #$1 => a string a channel is about to write into a launcher, inside double quotes
@@ -3696,7 +4052,7 @@ _api_reads_yes() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _api_is_fresh() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a file a channel left a cached answer in
+    #$1 => file
     [ -s "${1}" ] || return 1
     #--latest is what sets CMDFOUND_REFRESH
     [ -n "${CMDFOUND_REFRESH}" ] && return 1
@@ -3759,7 +4115,7 @@ _api_log_hint() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _api_launch_source() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    printf "%s\\n" "$(_realdir "${SELF}")/confined-launch"
+    printf "%s\\n" "$(_realdir "${SELF}")/docker.d/confined-launch"
 }
 
 _api_latest_release() { #@reviewed 2026-10-25 m@javier.io 2e226ed
@@ -3976,17 +4332,19 @@ _api_fetcher_bin() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 
 _api_fetcher() { #@reviewed 2026-10-25 m@javier.io 2e226ed
     #$1 => url, $2 => destination file, absent means stdout
-    _api_fetcher_bin || {
-        printf "%s\\n" "${PROGNAME}: install either 'curl' or 'wget'" >&2
-        return 1
-    }
-
+    #a path is read where it is, as the other fetchers read it: a machine with
+    #no downloader still reaches what is on its own disk
     if _util_is_local "${1}"; then
         _api_fetcher__src="${1#file://}"
         [ -z "${2}" ] && { cat "${_api_fetcher__src}"; return "${?}"; }
         cp "${_api_fetcher__src}" "${2}" 2>/dev/null
         return "${?}"
     fi
+
+    _api_fetcher_bin || {
+        printf "%s\\n" "${PROGNAME}: install either 'curl' or 'wget'" >&2
+        return 1
+    }
 
     #curl's -q keeps ~/.curlrc out, and curl heeds it only as its very first
     #argument; wget's --no-config, from _api_wget_options, keeps ~/.wgetrc out. The
@@ -4029,33 +4387,6 @@ _api_fetcher_verified() { #@reviewed 2026-10-25 m@javier.io 2e226ed
         return 1
     fi
 }
-
-#what a channel says when a catalog download stopped. It is one sentence and
-#not six because it promises what _api_fetcher_resumable does - the part stays,
-#with its etag, and the next run goes on from it - so a change there would
-#otherwise leave six channels saying something that is no longer true
-CATALOG_STOPPED="could not be downloaded; what arrived is kept, and the next try goes on from there"
-
-#how few rows is too few for a catalog to be one this reader still understands.
-#A number every channel checks against, so that moving it is one edit
-CATALOG_FLOOR="100"
-
-#what a channel says when a question needs the catalog it has not fetched yet
-NO_INDEX="there is no local catalog yet, run: cmdfound --index-update"
-
-#how a channel's _search matches: each word asked for, in any case and order,
-#is somewhere in the text the channel's own awk hands words_in. Put in front of
-#that awk, which says what the text is and prints the lines. The words come
-#as search_words through the environment, since awk -v reads a backslash in
-#them as an escape
-SEARCH_AWK='
-    BEGIN { _sw_n = split(tolower(ENVIRON["search_words"]), _sw_w, " ") }
-    function words_in(hay,    i) {
-        hay = tolower(hay)
-        for (i = 1; i <= _sw_n; i++) if (index(hay, _sw_w[i]) == 0) return 0
-        return 1
-    }
-'
 
 _api_fetcher_resumable() { #@reviewed 2026-10-25 m@javier.io 2e226ed
     #$1 => url or path, $2 => the name a stopped download is left under.
@@ -4117,7 +4448,7 @@ _api_fetcher_resumable() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _api_catalog_fetch() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => the catalog's url or path, $2 => the name a stopped download is left
+    #$1 => catalog's url or path, $2 => the name a stopped download is left
     #under, $3 => whose catalog it is, as the messages name it. Says why and
     #exits 2 when the catalog is not there or did not all arrive
     #    _api_catalog_fetch "${DIST}/pantry.tar.xz" "${kept}" pkgx
@@ -4128,6 +4459,15 @@ _api_catalog_fetch() { #@reviewed 2026-10-25 m@javier.io 2e226ed
         *) printf "unreachable=%s\\n" "${3}'s catalog ${CATALOG_STOPPED}" ;;
     esac
     exit 2
+}
+
+_api_catalog_arrived() {
+    #the catalog is downloaded, and what follows makes the index out of it. Not
+    #cut short from here, or what is made stays behind under this pid; and
+    #said, so that a race another channel wins leaves this one to finish
+    #instead of waiting on it (see _pause_others)
+    printf "%s\\n" "arrived=yes"
+    trap '' TERM INT HUP
 }
 
 _api_catalog_keep() { #@reviewed 2026-10-25 m@javier.io 2e226ed
@@ -4175,7 +4515,7 @@ _api_fetcher_leave_partial() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _api_fetcher_answered() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a url or a path, $2 => the file to write it into, then each header to
+    #$1 => url or path, $2 => file to write it into, then each header to
     #send. 0 fetched, 1 there is no such thing, 2 could not be had
     #    _api_fetcher_answered "${REGISTRY}/v2/jq/manifests/1" "${f}"  =>  0
     #    _api_fetcher_answered "${REGISTRY}/v2/jq/manifests/9" "${f}"  =>  1
@@ -4222,7 +4562,7 @@ _api_fetcher_answered() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _api_fetcher_code_in() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a url or a path, $2 => the file its body goes into, then each header
+    #$1 => url or path, $2 => file its body goes into, then each header
     #to send. Leaves the status in __out, 000 when nobody answered
     #    _api_fetcher_code_in "${API}/rate_limit" "${f}"  =>  __out 200
     #    a rate limit                                 =>  __out 403, and in ${f} the
@@ -4268,7 +4608,7 @@ _api_github_token_in() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _api_fetcher_github_in() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a url of github's api, $2 => the file its body goes into. Answers as
+    #$1 => url of github's api, $2 => file its body goes into. Answers as
     #_api_fetcher_code_in, asking in github's own json and with the user's token,
     #when there is one: the token goes to github's api and nowhere else
     #    _api_fetcher_github_in "${API}/rate_limit" "${f}"  =>  __out 200
@@ -4284,7 +4624,7 @@ _api_fetcher_github_in() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _api_fetcher_head_in() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a url, $2 => the header to read, $3 => any value to follow redirects
+    #$1 => url, $2 => header, $3 => any value to follow redirects
     #    _api_fetcher_head_in "${u}" content-length on  =>  __out 3600000, __code 200
     #    _api_fetcher_head_in "${u}/latest" location ""  =>  __out the url it points
     #                                                   at, __code 302
@@ -4329,7 +4669,7 @@ _api_fetcher_head_in() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 }
 
 _api_fetcher_head_size() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1 => a url or a path. Prints what fetching it would transfer, without
+    #$1 => url or path. Prints what fetching it would transfer, without
     #transferring it, and nothing when nobody can say: the length a 404 comes
     #with is the page's, not the file's
     #    _api_fetcher_head_size "${REPO}/jq-1.7.tar.gz"  =>  1258291
@@ -4392,22 +4732,147 @@ _api_latest_tag_in() { #@reviewed 2026-10-25 m@javier.io 2e226ed
     return 0
 }
 
+_api_registry_token_in() { #reviewed
+    #$1 => registry, $2 => repository in it.
+    #    _api_registry_token_in "${DOCKER_HUB}" library/alpine  =>  0, __out eyJhbGci...
+    #    _api_registry_token_in /srv/registry library/alpine    =>  0, __out empty
+    _api_registry_token_in__out=""
+    _util_is_local "${1}" && return 0
+    [ X"${1}" = X"${DOCKER_HUB}" ] || return 0
+    if [ -n "${g_registry_token}" ] && [ X"${g_registry_token_for}" = X"${2}" ]; then
+        _api_registry_token_in__out="${g_registry_token}"
+        return 0
+    fi
+    _rti__f="${CH}/tmp/token.$$"
+    _api_fetcher_answered "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${2}:pull" "${_rti__f}" || {
+        rm -f "${_rti__f}"
+        return 1
+    }
+    _rti__token="$(_util_json 1 < "${_rti__f}" | awk -F'\t' '$1 == "token" {print $2; exit}')"
+    rm -f "${_rti__f}"
+    #it goes into a header, which another character could end
+    case "${_rti__token}" in
+        ''|*[!${ALNUM}._-]*) return 1 ;;
+    esac
+    g_registry_token="${_rti__token}"; g_registry_token_for="${2}"
+    _api_registry_token_in__out="${_rti__token}"
+}
+
+_api_registry_digest_in() { #reviewed
+    #$1 => registry, $2 => repository, $3 => tag.
+    #    _api_registry_digest_in "${DOCKER_HUB}" library/alpine 3.22  =>  0, __out sha256:4bcff6...
+    _rdi__registry="${1}"; _rdi__repository="${2}"; _rdi__tag="${3}"
+    _api_registry_digest_in__out=""
+    if _util_is_local "${_rdi__registry}"; then
+        _rdi__f="${_rdi__registry#file://}/v2/${_rdi__repository}/manifests/${_rdi__tag}"
+        [ -f "${_rdi__f}" ] || return 1
+        _api_registry_digest_in__out="sha256:$(_util_checksum "${_rdi__f}")"
+        _util_is_digest "${_api_registry_digest_in__out}"
+        return "${?}"
+    fi
+    _api_registry_token_in "${_rdi__registry}" "${_rdi__repository}" || return 1
+    #no redirect is followed: a manifest is answered where it is asked for
+    set -- "Accept: ${REGISTRY_ACCEPT}"
+    [ -n "${_api_registry_token_in__out}" ] && set -- "${@}" "Authorization: Bearer ${_api_registry_token_in__out}"
+    _api_fetcher_head_in "${_rdi__registry}/v2/${_rdi__repository}/manifests/${_rdi__tag}" docker-content-digest "" "${@}" || return 1
+    [ X"${_api_fetcher_head_in__code}" = X"200" ] && _api_registry_digest_in__out="${_api_fetcher_head_in__out}"
+    _util_is_digest "${_api_registry_digest_in__out}"
+}
+
+_api_registry_manifest() { #reviewed
+    #$1 => registry, $2 => repository, $3 => digest, $4 => the file its manifest goes into. Answers as _api_fetcher_answered
+    if _util_is_local "${1}"; then
+        _api_fetcher_answered "${1#file://}/v2/${2}/manifests/${3}" "${4}"
+        return "${?}"
+    fi
+    _api_registry_token_in "${1}" "${2}" || return 2
+    if [ -n "${_api_registry_token_in__out}" ]; then
+        _api_fetcher_answered "${1}/v2/${2}/manifests/${3}" "${4}" "Accept: ${REGISTRY_ACCEPT}" "Authorization: Bearer ${_api_registry_token_in__out}"
+    else
+        _api_fetcher_answered "${1}/v2/${2}/manifests/${3}" "${4}" "Accept: ${REGISTRY_ACCEPT}"
+    fi
+}
+
+_api_registry_bytes_in() { #reviewed
+    #$1 => registry, $2 => repository, $3 => image's digest, $4 => architecture, $5 => variant.
+    #What the image weighs compressed in __out: its manifest's layers, or those
+    #of the manifest its index has for linux on that platform
+    #    _api_registry_bytes_in "${DOCKER_HUB}" library/alpine sha256:4bcff6... amd64 ""  =>  0, __out 3642132
+    _rbi__registry="${1}"; _rbi__repository="${2}"; _rbi__d="${3}"; _rbi__arch="${4}"; _rbi__variant="${5}"
+    _api_registry_bytes_in__out=""
+    _rbi__f="${CH}/tmp/manifest.$$"
+    #an index points at a manifest, and a manifest has the layers
+    for _rbi__asked in index manifest; do
+        _api_registry_manifest "${_rbi__registry}" "${_rbi__repository}" "${_rbi__d}" "${_rbi__f}" || { rm -f "${_rbi__f}"; return 1; }
+        _rbi__found="$(_util_json 4 < "${_rbi__f}" | awk -F'\t' -v a="${_rbi__arch}" -v v="${_rbi__variant}" '
+            { n = split($1, p, "/") }
+            n == 3 && p[1] == "layers" && p[3] == "size" && $2 ~ /^[0-9]+$/ { t += $2; k++ }
+            n == 3 && p[1] == "manifests" && p[3] == "digest" { d[p[2]] = $2 }
+            n == 4 && p[1] == "manifests" && p[3] == "platform" { plat[p[2], p[4]] = $2 }
+            END {
+                if (k) { printf("bytes %.0f\n", t); exit }
+                for (i = 0; (i "") in d; i++)
+                    if (plat[i, "os"] == "linux" && plat[i, "architecture"] == a && (v == "" || plat[i, "variant"] == v)) { print "digest " d[i]; exit }
+            }')"
+        rm -f "${_rbi__f}"
+        case "${_rbi__found}" in
+            "bytes "*) _api_registry_bytes_in__out="${_rbi__found#bytes }"; return 0 ;;
+            "digest "*) _rbi__d="${_rbi__found#digest }" ;;
+            *) return 1 ;;
+        esac
+        _util_is_digest "${_rbi__d}" || return 1
+    done
+    return 1
+}
+
+_api_image_in() { #reviewed
+    #$1 => image, $2 => registry, $3 => repository, $4 => tag; $5 and $6, architecture and variant
+    #In __out the image by digest, or $1 when no digest is known, and in __bytes
+    #    _api_image_in docker.io/library/alpine:3.22 "${DOCKER_HUB}" library/alpine 3.22
+    #        =>  __out docker.io/library/alpine:3.22@sha256:4bcff6...
+    #    the same and amd64 ""  =>  and __bytes 3642132
+    #
+    #never fails: out of reach, the digest kept is used however old. One image a
+    #channel: its digest is kept a day in the channel's cache/image.digest
+    _imi__image="${1}"; _imi__registry="${2}"; _imi__repository="${3}"; _imi__tag="${4}"; _imi__arch="${5}"; _imi__variant="${6}"
+    _api_image_in__out="${_imi__image}"; _api_image_in__bytes=""
+    _util_mkdir_p "${CH}/cache/manifests"; _util_mkdir_p "${CH}/tmp"
+    _imi__f="${CH}/cache/image.digest"
+    if _api_is_fresh "${_imi__f}"; then
+        IFS= read -r _imi__d < "${_imi__f}"
+    elif _api_registry_digest_in "${_imi__registry}" "${_imi__repository}" "${_imi__tag}"; then
+        _imi__d="${_api_registry_digest_in__out}"
+        printf "%s\\n" "${_imi__d}" | _util_write_aside "${_imi__f}" 2>/dev/null
+    else
+        _imi__d=""; IFS= read -r _imi__d 2>/dev/null < "${_imi__f}"
+    fi
+    _util_is_digest "${_imi__d}" || return 0
+    _api_image_in__out="${_imi__image}@${_imi__d}"
+    [ -n "${_imi__arch}" ] || return 0
+
+    _imi__b="${CH}/cache/manifests/${_imi__d#sha256:}.${_imi__arch}${_imi__variant}"
+    if [ ! -s "${_imi__b}" ]; then
+        _api_registry_bytes_in "${_imi__registry}" "${_imi__repository}" "${_imi__d}" "${_imi__arch}" "${_imi__variant}" || return 0
+        printf "%s\\n" "${_api_registry_bytes_in__out}" | _util_write_aside "${_imi__b}" 2>/dev/null
+        _api_image_in__bytes="${_api_registry_bytes_in__out}"
+        return 0
+    fi
+    IFS= read -r _api_image_in__bytes < "${_imi__b}"
+    _util_is_number "${_api_image_in__bytes}" || _api_image_in__bytes=""
+    return 0
+}
+
 _api_answer_failed() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1... => why this channel cannot place what it was asked for
     printf "failed=%s\\n" "${*}"
     exit 1
 }
 
 _api_answer_unreachable() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #$1... => why this channel could not ask, or be asked: the question stays
-    #open, where failed= closes it
     printf "unreachable=%s\\n" "${*}"
     exit 2
 }
 
 _api_answer_no_index() { #@reviewed 2026-10-25 m@javier.io 2e226ed
-    #what a channel answers when a question needs the catalog it has not fetched
-    #yet. _probe_all holds it back for _first_catalogs, which offers to fetch it
     printf "%s\\n" "unreachable=${NO_INDEX}" "needs=index"
     exit 2
 }
@@ -4443,6 +4908,52 @@ _api_answer_unresolved() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 ###############################################################################
 #################################### util #####################################
 ###############################################################################
+
+#a newline and a tab, so that one inside a pattern is a word: a line break no
+#longer splits the line it is written on, and three tabs can be counted
+NL="
+"
+TAB="	"
+
+#the alphabet written out: POSIX leaves A-Z unspecified outside the C locale
+ALNUM="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+#json is read with awk and not matched with patterns, so these read a string
+#the way json writes one: \uXXXX becomes utf-8, a surrogate pair included, and
+#a control escape becomes a space, the output being one line a record
+JSON_STRINGS='
+ function hex(h,   i, n) {
+    n = 0; h = tolower(h)
+    for (i = 1; i <= length(h); i++) n = n * 16 + index("0123456789abcdef", substr(h, i, 1)) - 1
+    return n
+ }
+ function utf8(n) {
+    if (n < 128) return sprintf("%c", n)
+    if (n < 2048) return sprintf("%c%c", 192 + int(n / 64), 128 + n % 64)
+    if (n < 65536) return sprintf("%c%c%c", 224 + int(n / 4096), 128 + int(n / 64) % 64, 128 + n % 64)
+    return sprintf("%c%c%c%c", 240 + int(n / 262144), 128 + int(n / 4096) % 64, 128 + int(n / 64) % 64, 128 + n % 64)
+ }
+ function unesc(s,   out, i, c, n, lo) {
+    if (index(s, "\\") == 0) return s
+    out = ""
+    while ((i = index(s, "\\")) > 0) {
+        out = out substr(s, 1, i - 1)
+        c = substr(s, i + 1, 1)
+        if (c == "u") {
+            n = hex(substr(s, i + 2, 4)); s = substr(s, i + 6)
+            if (n >= 55296 && n < 56320 && substr(s, 1, 2) == "\\u") {
+                lo = hex(substr(s, 3, 4))
+                if (lo >= 56320 && lo < 57344) { n = 65536 + (n - 55296) * 1024 + (lo - 56320); s = substr(s, 7) }
+            }
+            out = out utf8(n)
+            continue
+        }
+        if (c == "n" || c == "t" || c == "r" || c == "f" || c == "b") out = out " "
+        else out = out c
+        s = substr(s, i + 2)
+    }
+    return out s
+ }'
 
 _util_has_word() { #@frozen 2026-10-25 m@javier.io 2e226ed
     #$1 => words, $2 => a whole word
@@ -4528,11 +5039,14 @@ _util_is_number() { #@frozen 2026-10-25 m@javier.io 2e226ed
 }
 
 _util_now_ms() { #@frozen 2026-10-25 m@javier.io 2e226ed
-    #milliseconds, where date can say them, and whole seconds where it cannot
-    _nm__nanos="$(date +%s%N 2>/dev/null)"
-    case "${_nm__nanos}" in
-        ''|*[!0-9]*) printf "%s\\n" "$(( $(date +%s) * 1000 ))" ;;
-        *) printf "%s\\n" "$(( _nm__nanos / 1000000 ))" ;;
+    #milliseconds, where date can say them, and whole seconds where it cannot:
+    #busybox expands %N to nothing and macOS to an N, so the point keeps the
+    #seconds apart from what follows them
+    _nm__now="$(date +%s.%N 2>/dev/null)"
+    case "${_nm__now}" in
+        [0-9]*.[0-9][0-9][0-9]*) _nm__frac="${_nm__now#*.}"
+            printf "%s\\n" "$(( ${_nm__now%%.*} * 1000 + 1${_nm__frac%"${_nm__frac#???}"} - 1000 ))" ;;
+        *) printf "%s\\n" "$(( $(date +%s) * 1000 ))" ;;
     esac
 }
 
@@ -4552,15 +5066,6 @@ _util_is_empty_but() { #@frozen 2026-10-25 m@javier.io 2e226ed
     done
     return 0
 }
-
-#a newline and a tab, so that one inside a pattern is a word: a line break no
-#longer splits the line it is written on, and three tabs can be counted
-NL="
-"
-TAB="	"
-
-#the alphabet written out: POSIX leaves A-Z unspecified outside the C locale
-ALNUM="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 _util_is_one_line() { #@frozen 2026-10-25 m@javier.io 2e226ed
     #    _util_is_one_line store/jq-1.7/bin/jq  =>  0
@@ -4668,43 +5173,6 @@ _util_trap_exit() { #@reviewed 2026-10-25 m@javier.io 2e226ed
     trap "${1}" EXIT
     trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 }
-
-#json is read with awk and not matched with patterns, so these read a string
-#the way json writes one: \uXXXX becomes utf-8, a surrogate pair included, and
-#a control escape becomes a space, the output being one line a record
-JSON_STRINGS='
- function hex(h,   i, n) {
-    n = 0; h = tolower(h)
-    for (i = 1; i <= length(h); i++) n = n * 16 + index("0123456789abcdef", substr(h, i, 1)) - 1
-    return n
- }
- function utf8(n) {
-    if (n < 128) return sprintf("%c", n)
-    if (n < 2048) return sprintf("%c%c", 192 + int(n / 64), 128 + n % 64)
-    if (n < 65536) return sprintf("%c%c%c", 224 + int(n / 4096), 128 + int(n / 64) % 64, 128 + n % 64)
-    return sprintf("%c%c%c%c", 240 + int(n / 262144), 128 + int(n / 4096) % 64, 128 + int(n / 64) % 64, 128 + n % 64)
- }
- function unesc(s,   out, i, c, n, lo) {
-    if (index(s, "\\") == 0) return s
-    out = ""
-    while ((i = index(s, "\\")) > 0) {
-        out = out substr(s, 1, i - 1)
-        c = substr(s, i + 1, 1)
-        if (c == "u") {
-            n = hex(substr(s, i + 2, 4)); s = substr(s, i + 6)
-            if (n >= 55296 && n < 56320 && substr(s, 1, 2) == "\\u") {
-                lo = hex(substr(s, 3, 4))
-                if (lo >= 56320 && lo < 57344) { n = 65536 + (n - 55296) * 1024 + (lo - 56320); s = substr(s, 7) }
-            }
-            out = out utf8(n)
-            continue
-        }
-        if (c == "n" || c == "t" || c == "r" || c == "f" || c == "b") out = out " "
-        else out = out c
-        s = substr(s, i + 2)
-    }
-    return out s
- }'
 
 _util_json() { #@reviewed 2026-10-25 m@javier.io 2e226ed
 #$1 => the deepest level worth printing (99), $2 => any value to also print

@@ -271,8 +271,7 @@ _index() {
     kept="${CH}/index/channeldata.json.part"; part="${kept}.$$"; new="${INDEX}.$$"
     _api_catalog_fetch "${CHANNEL}/channeldata.json" "${kept}" conda-forge
     bytes="$(wc -c < "${part}" | awk '{print $1}')"
-    #not cut short from here: the old index could be left half replaced
-    trap '' TERM INT HUP
+    _api_catalog_arrived
     _indexer < "${part}" | LC_ALL=C sort -u > "${new}"
     rm -f "${part}"
     _api_catalog_keep "${new}" "${INDEX}" "$(awk 'END {print NR}' "${new}")" "conda-forge's catalog"
